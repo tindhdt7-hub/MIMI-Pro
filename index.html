@@ -1,572 +1,128 @@
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MIMI PRO</title>
-
-  <style>
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: #05070a;
-      color: white;
-      font-family: Arial, sans-serif;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-    }
-
-    .mimi {
-      width: min(92%, 500px);
-      text-align: center;
-    }
-
-    h1 {
-      margin-bottom: 8px;
-      font-size: 42px;
-      letter-spacing: 4px;
-    }
-
-    .status {
-      color: #7cffb2;
-      margin-bottom: 30px;
-    }
-
-    .face {
-      width: 220px;
-      height: 220px;
-      margin: 0 auto 30px;
-      border-radius: 50%;
-      border: 3px solid #333;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      gap: 35px;
-      background: #0b1016;
-      box-shadow: 0 0 40px rgba(0, 255, 180, 0.15);
-    }
-
-    .eye {
-      width: 38px;
-      height: 65px;
-      border-radius: 50%;
-      background: #72ffd0;
-      box-shadow: 0 0 25px #72ffd0;
-    }
-
-    button {
-      border: 0;
-      border-radius: 50px;
-      padding: 16px 30px;
-      font-size: 18px;
-      font-weight: bold;
-      cursor: pointer;
-      background: #72ffd0;
-      color: #06100c;
-      -webkit-tap-highlight-color: transparent;
-      touch-action: manipulation;
-    }
-
-    button:active {
-      transform: scale(0.96);
-    }
-
-    button:disabled {
-      opacity: 0.7;
-    }
-
-    .input {
-      margin-top: 25px;
-      min-height: 60px;
-      padding: 15px;
-      border-radius: 15px;
-      background: #111820;
-      color: #aaa;
-    }
-
-    .response {
-      margin-top: 15px;
-      min-height: 70px;
-      padding: 18px;
-      border-radius: 15px;
-      background: #0d151c;
-      font-size: 18px;
-      line-height: 1.5;
-    }
-  </style>
-</head>
-
-<body>
-
-  <div class="mimi">
-
-    <h1>MIMI</h1>
-
-    <div class="status" id="status">
-      MIMI PRO • ONLINE
-    </div>
-
-    <div class="face">
-      <div class="eye"></div>
-      <div class="eye"></div>
-    </div>
-
-    <button id="talkButton" type="button">
-      🎤 NÓI VỚI MIMI
-    </button>
-
-    <div class="input" id="inputText">
-      Mimi đang chờ...
-    </div>
-
-    <div class="response" id="response">
-      ...
-    </div>
-
-  </div>
-
 <script>
+const XIAOZHI_WS="ws://192.168.1.186:8000/xiaozhi/v1/";
+const talkButton=document.getElementById("talkButton");
+const statusText=document.getElementById("status");
+const inputText=document.getElementById("inputText");
+const responseText=document.getElementById("response");
 
-const WORKER_URL =
-  "https://mimi-pro-core.tindhdt7.workers.dev/";
+let ws=null,recognition=null,isListening=false;
 
-const talkButton =
-  document.getElementById("talkButton");
+function connectXiaozhi(){
+  ws=new WebSocket(XIAOZHI_WS);
+  ws.binaryType="arraybuffer";
 
-const statusText =
-  document.getElementById("status");
-
-const inputText =
-  document.getElementById("inputText");
-
-const responseText =
-  document.getElementById("response");
-
-let recognition = null;
-let isListening = false;
-let isProcessing = false;
-
-
-/* =========================
-   SPEECH RECOGNITION
-   ========================= */
-
-const SpeechRecognition =
-  window.SpeechRecognition ||
-  window.webkitSpeechRecognition;
-
-
-if (SpeechRecognition) {
-
-  recognition = new SpeechRecognition();
-
-  recognition.lang = "vi-VN";
-
-  recognition.continuous = false;
-
-  recognition.interimResults = true;
-
-  recognition.maxAlternatives = 1;
-
-
-  recognition.onstart = () => {
-
-    console.log("MIMI: recognition started");
-
-    isListening = true;
-
-    statusText.textContent =
-      "🎤 MIMI ĐANG NGHE...";
-
-    talkButton.textContent =
-      "🎤 ĐANG NGHE";
-
-    talkButton.disabled = false;
+  ws.onopen=()=>{
+    statusText.textContent="🟢 MIMI • XIAOZHI ONLINE";
+    console.log("Xiaozhi WebSocket connected");
   };
 
+  ws.onmessage=e=>{
+    console.log("Xiaozhi:",e.data);
 
-  recognition.onaudiostart = () => {
-
-    console.log("MIMI: audio started");
-
-    statusText.textContent =
-      "🎤 MIMI ĐANG NGHE...";
-  };
-
-
-  recognition.onspeechstart = () => {
-
-    console.log("MIMI: speech started");
-
-    statusText.textContent =
-      "👂 MIMI ĐANG NGHE GIỌNG...";
-  };
-
-
-  recognition.onresult = async (event) => {
-
-    let text = "";
-
-    for (
-      let i = event.resultIndex;
-      i < event.results.length;
-      i++
-    ) {
-
-      text +=
-        event.results[i][0].transcript;
-    }
-
-    text = text.trim();
-
-    console.log(
-      "MIMI nhận được:",
-      text
-    );
-
-    if (!text) {
-      return;
-    }
-
-    inputText.textContent = text;
-
-    statusText.textContent =
-      "🤖 MIMI ĐANG SUY NGHĨ...";
-
-    isProcessing = true;
-
-    talkButton.disabled = true;
-
-
-    /* =========================
-       SEND TO MIMI CORE
-       ========================= */
-
-    try {
-
-      const result = await fetch(
-        WORKER_URL,
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type": "application/json"
-          },
-
-          body: JSON.stringify({
-            message: text
-          })
+    if(typeof e.data==="string"){
+      try{
+        const data=JSON.parse(e.data);
+        const text=data.text||data.reply||data.message||data.content;
+        if(text){
+          responseText.textContent=text;
+          speak(text);
         }
-      );
-
-
-      if (!result.ok) {
-
-        const errorText =
-          await result.text();
-
-        throw new Error(
-          "HTTP " +
-          result.status +
-          ": " +
-          errorText
-        );
+      }catch{
+        responseText.textContent=e.data;
       }
-
-
-      const data =
-        await result.json();
-
-
-      const answer =
-        data.reply ||
-        data.response ||
-        data.message ||
-        data.text ||
-        "MIMI chưa có câu trả lời.";
-
-
-      responseText.textContent =
-        answer;
-
-
-      statusText.textContent =
-        "🔊 MIMI ĐANG NÓI...";
-
-
-      /* =========================
-         TEXT TO SPEECH
-         ========================= */
-
-      speak(answer);
-
-
-    } catch (error) {
-
-      console.error(
-        "MIMI CORE ERROR:",
-        error
-      );
-
-
-      responseText.textContent =
-        "Lỗi MIMI Core: " +
-        error.message;
-
-
-      statusText.textContent =
-        "❌ AI CORE ERROR";
-    }
-
-
-    isProcessing = false;
-
-    talkButton.disabled = false;
-
-    talkButton.textContent =
-      "🎤 NÓI VỚI MIMI";
-  };
-
-
-  recognition.onspeechend = () => {
-
-    console.log(
-      "MIMI: speech ended"
-    );
-  };
-
-
-  recognition.onerror = (event) => {
-
-    console.error(
-      "MIMI SPEECH ERROR:",
-      event.error
-    );
-
-    isListening = false;
-
-
-    if (event.error === "not-allowed") {
-
-      statusText.textContent =
-       "❌ iPhone chưa cho phép microphone";
-
-    } else if (
-      event.error === "service-not-allowed"
-    ) {
-
-      statusText.textContent =
-        "❌ Safari chặn Speech Recognition";
-
-    } else if (
-      event.error === "no-speech"
-    ) {
-
-      statusText.textContent =
-        "⚠️ MIMI không nghe thấy giọng nói";
-
-    } else if (
-      event.error === "network"
-    ) {
-
-      statusText.textContent =
-        "❌ Speech Recognition lỗi mạng";
-
-    } else {
-
-      statusText.textContent =
-        "❌ Speech: " +
-        event.error;
-    }
-
-
-    inputText.textContent =
-      "Hãy thử nói lại...";
-
-    talkButton.disabled = false;
-
-    talkButton.textContent =
-      "🎤 NÓI VỚI MIMI";
-  };
-
-
-  recognition.onend = () => {
-
-    console.log(
-      "MIMI: recognition ended"
-    );
-
-    isListening = false;
-
-
-    if (!isProcessing) {
-
-      talkButton.disabled = false;
-
-      talkButton.textContent =
-        "🎤 NÓI VỚI MIMI";
-
-      statusText.textContent =
-        "MIMI PRO • ONLINE";
     }
   };
 
-} else {
+  ws.onerror=e=>{
+    console.error("Xiaozhi WS error",e);
+    statusText.textContent="❌ XIAOZHI WS ERROR";
+  };
 
-  statusText.textContent =
-    "❌ Trình duyệt không hỗ trợ Speech Recognition";
+  ws.onclose=()=>{
+    statusText.textContent="🔴 XIAOZHI OFFLINE";
+    console.log("Xiaozhi WebSocket closed");
+  };
 }
 
-
-/* =========================
-   TEXT TO SPEECH
-   ========================= */
-
-function speak(text) {
-
-  if (!("speechSynthesis" in window)) {
-
-    statusText.textContent =
-      "⚠️ Thiết bị không hỗ trợ đọc tiếng";
-
+function sendToXiaozhi(text){
+  if(!ws||ws.readyState!==WebSocket.OPEN){
+    statusText.textContent="❌ Chưa kết nối Xiaozhi";
     return;
   }
 
-  const synth =
-    window.speechSynthesis;
-
-  synth.cancel();
-
-  const utterance =
-    new SpeechSynthesisUtterance(text);
-
-  utterance.lang = "vi-VN";
-  utterance.rate = 0.95;
-  utterance.pitch = 1.0;
-  utterance.volume = 1.0;
-
-
-  utterance.onstart = () => {
-
-    statusText.textContent =
-      "🔊 MIMI ĐANG NÓI...";
+  const message={
+    type:"listen",
+    state:"start",
+    text:text
   };
 
-
-  utterance.onend = () => {
-
-    statusText.textContent =
-      "MIMI PRO • ONLINE";
-  };
-
-
-  utterance.onerror = (event) => {
-
-    console.error(
-      "MIMI TTS ERROR:",
-      event
-    );
-
-    statusText.textContent =
-      "❌ MIMI không phát được loa";
-  };
-
-
-  synth.speak(utterance);
+  ws.send(JSON.stringify(message));
+  console.log("MIMI → Xiaozhi:",message);
 }
 
+const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
 
-/* =========================
-   TALK BUTTON
-   ========================= */
+if(SpeechRecognition){
+  recognition=new SpeechRecognition();
+  recognition.lang="vi-VN";
+  recognition.continuous=false;
+  recognition.interimResults=false;
 
-talkButton.addEventListener(
-  "click",
-  () => {
+  recognition.onstart=()=>{
+    isListening=true;
+    statusText.textContent="🎤 MIMI ĐANG NGHE...";
+    talkButton.textContent="🎤 ĐANG NGHE";
+  };
 
-    console.log(
-      "MIMI button clicked"
-    );
+  recognition.onresult=e=>{
+    const text=e.results[0][0].transcript.trim();
+    if(!text)return;
 
+    inputText.textContent=text;
+    responseText.textContent="...";
+    statusText.textContent="🤖 MIMI → XIAOZHI...";
 
-    /*
-      Unlock Speech Synthesis
-      ngay trong thao tác chạm
-      của người dùng trên iPhone.
-    */
+    sendToXiaozhi(text);
+  };
 
-    speechSynthesis.cancel();
+  recognition.onerror=e=>{
+    console.error(e);
+    statusText.textContent="❌ Micro: "+e.error;
+    isListening=false;
+    talkButton.textContent="🎤 NÓI VỚI MIMI";
+  };
 
-    const unlockVoice =
-      new SpeechSynthesisUtterance("");
+  recognition.onend=()=>{
+    isListening=false;
+    talkButton.textContent="🎤 NÓI VỚI MIMI";
+  };
+}
 
-    unlockVoice.volume = 0;
+talkButton.onclick=()=>{
+  if(!recognition)return;
 
-    speechSynthesis.speak(
-      unlockVoice
-    );
-
-
-    if (!recognition) {
-
-      statusText.textContent =
-        "❌ Không có Speech Recognition";
-
-      return;
-    }
-
-
-    if (isListening) {
-
-      console.log(
-        "MIMI: stopping recognition"
-      );
-
-      recognition.stop();
-
-      return;
-    }
-
-
-    inputText.textContent =
-      "Mimi đang nghe...";
-
-    responseText.textContent =
-      "...";
-
-    statusText.textContent =
-      "🎤 MIMI ĐANG KHỞI ĐỘNG MICRO...";
-
-
-    try {
-
-    recognition.start();
-
-    } catch (error) {
-
-      console.error(
-        "Recognition start error:",
-        error
-      );
-
-      statusText.textContent =
-        "❌ Không thể bắt đầu microphone";
-
-      talkButton.disabled = false;
-    }
-
-  },
-  {
-    passive: true
+  if(isListening){
+    recognition.stop();
+    return;
   }
-);
 
+  inputText.textContent="Mimi đang nghe...";
+  recognition.start();
+};
+
+function speak(text){
+  if(!("speechSynthesis"in window))return;
+
+  speechSynthesis.cancel();
+
+  const u=new SpeechSynthesisUtterance(text);
+  u.lang="vi-VN";
+  u.rate=.95;
+  u.onstart=()=>statusText.textContent="🔊 MIMI ĐANG NÓI...";
+  u.onend=()=>statusText.textContent="🟢 MIMI • XIAOZHI ONLINE";
+
+  speechSynthesis.speak(u);
+}
+
+connectXiaozhi();
 </script>
-
-</body>
-</html>
