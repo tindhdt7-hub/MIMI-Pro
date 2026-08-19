@@ -174,8 +174,6 @@ if (SpeechRecognition) {
   recognition.maxAlternatives = 1;
 
 
-  /* START */
-
   recognition.onstart = () => {
 
     console.log("MIMI: recognition started");
@@ -192,8 +190,6 @@ if (SpeechRecognition) {
   };
 
 
-  /* AUDIO START */
-
   recognition.onaudiostart = () => {
 
     console.log("MIMI: audio started");
@@ -203,8 +199,6 @@ if (SpeechRecognition) {
   };
 
 
-  /* SPEECH START */
-
   recognition.onspeechstart = () => {
 
     console.log("MIMI: speech started");
@@ -213,8 +207,6 @@ if (SpeechRecognition) {
       "👂 MIMI ĐANG NGHE GIỌNG...";
   };
 
-
-  /* RESULT */
 
   recognition.onresult = async (event) => {
 
@@ -237,11 +229,9 @@ if (SpeechRecognition) {
       text
     );
 
-
     if (!text) {
       return;
     }
-
 
     inputText.textContent = text;
 
@@ -306,10 +296,12 @@ if (SpeechRecognition) {
 
 
       statusText.textContent =
-        "🔊 MIMI ĐANG TRẢ LỜI...";
+        "🔊 MIMI ĐANG NÓI...";
 
 
-      /* SPEAK */
+      /* =========================
+         TEXT TO SPEECH
+         ========================= */
 
       speak(answer);
 
@@ -341,8 +333,6 @@ if (SpeechRecognition) {
   };
 
 
-  /* SPEECH END */
-
   recognition.onspeechend = () => {
 
     console.log(
@@ -351,8 +341,6 @@ if (SpeechRecognition) {
   };
 
 
-  /* ERROR */
-
   recognition.onerror = (event) => {
 
     console.error(
@@ -360,21 +348,13 @@ if (SpeechRecognition) {
       event.error
     );
 
-
     isListening = false;
 
-
-    /*
-
-    Hiển thị lỗi thật để kiểm tra iPhone.
-      Không còn báo chung chung
-      "LỖI MICROPHONE".
-    */
 
     if (event.error === "not-allowed") {
 
       statusText.textContent =
-        "❌ iPhone chưa cho phép microphone";
+       "❌ iPhone chưa cho phép microphone";
 
     } else if (
       event.error === "service-not-allowed"
@@ -408,7 +388,6 @@ if (SpeechRecognition) {
     inputText.textContent =
       "Hãy thử nói lại...";
 
-
     talkButton.disabled = false;
 
     talkButton.textContent =
@@ -416,14 +395,11 @@ if (SpeechRecognition) {
   };
 
 
-  /* END */
-
   recognition.onend = () => {
 
     console.log(
       "MIMI: recognition ended"
     );
-
 
     isListening = false;
 
@@ -444,7 +420,6 @@ if (SpeechRecognition) {
 
   statusText.textContent =
     "❌ Trình duyệt không hỗ trợ Speech Recognition";
-
 }
 
 
@@ -454,9 +429,7 @@ if (SpeechRecognition) {
 
 function speak(text) {
 
-  if (
-    !("speechSynthesis" in window)
-  ) {
+  if (!("speechSynthesis" in window)) {
 
     statusText.textContent =
       "⚠️ Thiết bị không hỗ trợ đọc tiếng";
@@ -464,25 +437,25 @@ function speak(text) {
     return;
   }
 
+  const synth =
+    window.speechSynthesis;
 
-  speechSynthesis.cancel();
-
+  synth.cancel();
 
   const utterance =
     new SpeechSynthesisUtterance(text);
 
+  utterance.lang = "vi-VN";
+  utterance.rate = 0.95;
+  utterance.pitch = 1.0;
+  utterance.volume = 1.0;
 
-  utterance.lang =
-    "vi-VN";
 
-  utterance.rate =
-    1.0;
+  utterance.onstart = () => {
 
-  utterance.pitch =
-    1.0;
-
-  utterance.volume =
-    1.0;
+    statusText.textContent =
+      "🔊 MIMI ĐANG NÓI...";
+  };
 
 
   utterance.onend = () => {
@@ -492,9 +465,19 @@ function speak(text) {
   };
 
 
-  speechSynthesis.speak(
-    utterance
-  );
+  utterance.onerror = (event) => {
+
+    console.error(
+      "MIMI TTS ERROR:",
+      event
+    );
+
+    statusText.textContent =
+      "❌ MIMI không phát được loa";
+  };
+
+
+  synth.speak(utterance);
 }
 
 
@@ -508,6 +491,24 @@ talkButton.addEventListener(
 
     console.log(
       "MIMI button clicked"
+    );
+
+
+    /*
+      Unlock Speech Synthesis
+      ngay trong thao tác chạm
+      của người dùng trên iPhone.
+    */
+
+    speechSynthesis.cancel();
+
+    const unlockVoice =
+      new SpeechSynthesisUtterance("");
+
+    unlockVoice.volume = 0;
+
+    speechSynthesis.speak(
+      unlockVoice
     );
 
 
@@ -535,21 +536,16 @@ talkButton.addEventListener(
     inputText.textContent =
       "Mimi đang nghe...";
 
-
     responseText.textContent =
       "...";
-
 
     statusText.textContent =
       "🎤 MIMI ĐANG KHỞI ĐỘNG MICRO...";
 
 
-    speechSynthesis.cancel();
-
-
     try {
 
-      recognition.start();
+    recognition.start();
 
     } catch (error) {
 
@@ -558,13 +554,10 @@ talkButton.addEventListener(
         error
       );
 
-
       statusText.textContent =
         "❌ Không thể bắt đầu microphone";
 
-
-      talkButton.disabled =
-        false;
+      talkButton.disabled = false;
     }
 
   },
