@@ -1,1 +1,296 @@
 
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MIMI PRO</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #05070a;
+      color: white;
+      font-family: Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .mimi {
+      width: min(92%, 500px);
+      text-align: center;
+    }
+
+    h1 {
+      margin-bottom: 8px;
+      font-size: 42px;
+      letter-spacing: 4px;
+    }
+
+    .status {
+      color: #7cffb2;
+      margin-bottom: 30px;
+    }
+
+    .face {
+      width: 220px;
+      height: 220px;
+      margin: 0 auto 30px;
+      border-radius: 50%;
+      border: 3px solid #333;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 35px;
+      background: #0b1016;
+      box-shadow: 0 0 40px rgba(0, 255, 180, 0.15);
+    }
+
+    .eye {
+      width: 38px;
+      height: 65px;
+      border-radius: 50%;
+      background: #72ffd0;
+      box-shadow: 0 0 25px #72ffd0;
+    }
+
+    button {
+      border: 0;
+      border-radius: 50px;
+      padding: 16px 30px;
+      font-size: 18px;
+      font-weight: bold;
+      cursor: pointer;
+      background: #72ffd0;
+      color: #06100c;
+    }
+
+    button:active {
+      transform: scale(0.96);
+    }
+
+    .input {
+      margin-top: 25px;
+      min-height: 60px;
+      padding: 15px;
+      border-radius: 15px;
+      background: #111820;
+      color: #aaa;
+    }
+
+    .response {
+      margin-top: 15px;
+      min-height: 70px;
+      padding: 18px;
+      border-radius: 15px;
+      background: #0d151c;
+      font-size: 18px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="mimi">
+
+    <h1>MIMI</h1>
+
+    <div class="status" id="status">
+      MIMI PRO • ONLINE
+    </div>
+
+    <div class="face">
+      <div class="eye"></div>
+      <div class="eye"></div>
+    </div>
+
+    <button id="talkButton">
+      🎤 NÓI VỚI MIMI
+    </button>
+
+    <div class="input" id="inputText">
+      Mimi đang chờ...
+    </div>
+
+    <div class="response" id="response">
+      ...
+    </div>
+
+  </div>
+
+<script>
+
+const WORKER_URL =
+  "https://mimi-ai-core.tindhdt7.workers.dev/";
+
+const talkButton = document.getElementById("talkButton");
+const statusText = document.getElementById("status");
+const inputText = document.getElementById("inputText");
+const responseText = document.getElementById("response");
+
+let recognition;
+
+if ("webkitSpeechRecognition" in window ||
+    "SpeechRecognition" in window) {
+
+  const SpeechRecognition =
+    window.SpeechRecognition ||
+    window.webkitSpeechRecognition;
+
+  recognition = new SpeechRecognition();
+
+  recognition.lang = "vi-VN";
+  recognition.continuous = false;
+  recognition.interimResults = false;
+
+  recognition.onstart = () => {
+    statusText.textContent = "🎤 MIMI ĐANG NGHE...";
+
+    talkButton.textContent = "🎤 ĐANG NGHE";
+  };
+
+  recognition.onresult = async (event) => {
+
+    const text =
+      event.results[0][0].transcript;
+
+    inputText.textContent = text;
+
+    statusText.textContent =
+      "🤖 MIMI ĐANG SUY NGHĨ...";
+
+    talkButton.disabled = true;
+
+    try {
+
+      const result = await fetch(WORKER_URL, {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+          message: text
+        })
+      });
+
+      if (!result.ok) {
+        throw new Error(
+          "HTTP " + result.status
+        );
+      }
+
+      const data = await result.json();
+
+      const answer =
+        data.reply ||
+        data.response ||
+        data.message ||
+        data.text ||
+        "MIMI chưa có câu trả lời.";
+
+      responseText.textContent = answer;
+
+      statusText.textContent =
+        "🔊 MIMI ĐANG TRẢ LỜI...";
+
+      speak(answer);
+
+    } catch (error) {
+
+      console.error(error);
+
+      responseText.textContent =
+        "Không kết nối được MIMI AI Core.";
+
+      statusText.textContent =
+        "❌ AI CORE ERROR";
+
+    }
+
+    talkButton.disabled = false;
+    talkButton.textContent =
+      "🎤 NÓI VỚI MIMI";
+  };
+
+  recognition.onerror = (event) => {
+
+    console.error(event);
+
+    statusText.textContent =
+      "❌ LỖI MICROPHONE";
+
+    talkButton.disabled = false;
+    talkButton.textContent =
+      "🎤 NÓI VỚI MIMI";
+  };
+
+  recognition.onend = () => {
+
+    if (!talkButton.disabled) {
+      statusText.textContent =
+        "MIMI PRO • ONLINE";
+    }
+  };
+
+} else {
+
+  statusText.textContent =
+    "❌ Trình duyệt không hỗ trợ microphone";
+
+}
+
+function speak(text) {
+
+  if (!("speechSynthesis" in window)) {
+
+    statusText.textContent =
+      "⚠️ Thiết bị không hỗ trợ đọc tiếng";
+
+    return;
+  }
+
+  speechSynthesis.cancel();
+
+  const utterance =
+    new SpeechSynthesisUtterance(text);
+
+  utterance.lang = "vi-VN";
+  utterance.rate = 1.0;
+  utterance.pitch = 1.0;
+  utterance.volume = 1.0;
+
+  utterance.onend = () => {
+
+    statusText.textContent =
+      "MIMI PRO • ONLINE";
+  };
+
+  speechSynthesis.speak(utterance);
+}
+
+talkButton.addEventListener(
+  "click",
+  () => {
+
+    if (!recognition) return;
+
+    speechSynthesis.cancel();
+
+    recognition.start();
+
+  }
+);
+
+</script>
+
+</body>
+</html>
