@@ -182,11 +182,12 @@ if ("webkitSpeechRecognition" in window ||
         })
       });
 
-      if (!result.ok) {
-        throw new Error(
-          "HTTP " + result.status
-        );
-      }
+     if (!result.ok) {
+  const errorText = await result.text();
+  throw new Error(
+    "HTTP " + result.status + ": " + errorText
+  );
+}
 
       const data = await result.json();
 
@@ -208,9 +209,9 @@ if ("webkitSpeechRecognition" in window ||
 
       console.error(error);
 
-      responseText.textContent =
-        "Không kết nối được MIMI AI Core.";
-
+     responseText.textContent =
+  "Lỗi MIMI Core: " + error.message;
+      
       statusText.textContent =
         "❌ AI CORE ERROR";
 
