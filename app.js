@@ -1,4 +1,3 @@
-
 const CONFIG = {
   workerUrl: "https://mimi-pro-core.tindhdt7.workers.dev/chat",
   language: "vi-VN"
