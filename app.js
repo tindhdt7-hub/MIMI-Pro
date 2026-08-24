@@ -5,9 +5,9 @@ const VOICE_CONFIG = {
   // Change only the host if the server runs on another machine.
   xiaozhiWsUrl: "ws://192.168.1.186:8000/xiaozhi/v1/",
 
-  sampleRate: 16000,
+  sampleRate: 24000,
   channels: 1,
-  frameSamples: 960,       // 60 ms @ 24 kHz
+  frameSamples: 1440,       // 60 ms @ 24 kHz
   bitrate: 24000,
 
   // This is what enables Xiaozhi's server-side VAD/interrupt path.
@@ -46,6 +46,19 @@ const voiceManager = {
   setState(next) {
     this.state = next;
     console.log("[MIMI VoiceManager]", next);
+
+    const map = {
+      IDLE: "IDLE",
+      CONNECTING: "CONNECTING",
+      LISTENING: "LISTENING",
+      SPEAKING: "SPEAKING",
+      INTERRUPTED: "INTERRUPTED",
+      ERROR: "ERROR"
+    };
+
+    setVoicePanel("server", map[next] || next,
+      next === VoiceState.ERROR ? "error" :
+      next === VoiceState.LISTENING || next === VoiceState.SPEAKING ? "on" : "");
   },
 
   activity(text) {
@@ -68,6 +81,8 @@ const voiceManager = {
     if (this.socket?.readyState === WebSocket.OPEN) return;
 
     this.setState(VoiceState.CONNECTING);
+    setVoicePanel("server", "CONNECTING…", "warn");
+    addVoiceEvent("WebSocket → CONNECTING");
 
     await new Promise((resolve, reject) => {
       const ws = new WebSocket(this.makeWsUrl());
@@ -81,6 +96,9 @@ const voiceManager = {
 
       ws.onopen = () => {
         this.activity("Xiaozhi WS mở");
+        addVoiceEvent("Xiaozhi WebSocket OPEN");
+        setVoicePanel("websocket", "OPEN", "on");
+        setVoicePanel("server", "WebSocket đã mở", "on");
 
         // aec:true is important: the supplied Xiaozhi server uses
         // server-side AEC + VAD to interrupt TTS when the user speaks.
@@ -94,8 +112,8 @@ const voiceManager = {
           transport: "websocket",
           audio_params: {
             format: "opus",
-            sample_rate: VOICE_CONFIG.sampleRate,
-            channels: VOICE_CONFIG.channels,
+            sample_rate: 24000,
+            channels: 1,
             frame_duration: 60
           }
         }));
@@ -121,6 +139,10 @@ const voiceManager = {
           clearTimeout(timeout);
           this.sessionId = msg.session_id || null;
           this.activity("Xiaozhi hello OK");
+          addVoiceEvent("HELLO OK → session nhận");
+          setVoicePanel("session", this.sessionId || "—", "on");
+          setVoicePanel("server", "HELLO OK", "on");
+          setVoicePanel("audio", "Opus / " + (msg.audio_params?.sample_rate || VOICE_CONFIG.sampleRate) + " Hz");
           resolve();
           return;
         }
@@ -137,6 +159,9 @@ const voiceManager = {
         clearTimeout(timeout);
         this.socket = null;
         this.sessionId = null;
+        setVoicePanel("websocket", "CLOSED");
+        setVoicePanel("session", "—");
+        setVoicePanel("server", "WebSocket đóng");
         if (this.state !== VoiceState.ERROR) {
           this.setState(VoiceState.IDLE);
         }
@@ -148,14 +173,26 @@ const voiceManager = {
   async handleEvent(msg) {
     switch (msg.type) {
       case "stt":
+        setVoicePipeline("stt");
+        addVoiceEvent(msg.text ? "STT / FunASR → " + msg.text : "STT EVENT");
+        setVoicePanel("stt", msg.text ? "OK" : "EVENT", msg.text ? "on" : "warn");
         if (msg.text) {
           showConversation(msg.text);
           addActivity("Bạn: " + msg.text);
           ui.systemMic.textContent = "Đã nghe";
+          setVoicePipeline("thinking");
+          addVoiceEvent("MIMI / AI CORE → đang xử lý");
         }
         break;
 
       case "tts":
+        if (msg.state === "start") {
+          setVoicePipeline("tts");
+          addVoiceEvent("TTS → bắt đầu");
+        }
+        setVoicePanel("tts", msg.state || "EVENT",
+          msg.state === "start" ? "on" :
+          msg.state === "stop" ? "" : "warn");
         if (msg.state === "start") {
           this.setState(VoiceState.SPEAKING);
           setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
@@ -167,6 +204,8 @@ const voiceManager = {
             addActivity("MIMI: " + msg.text);
           }
         } else if (msg.state === "stop") {
+          setVoicePipeline("listening");
+          addVoiceEvent("TTS STOP → quay lại LISTENING");
           this.setState(VoiceState.LISTENING);
           setStatus("🎤 MIMI ĐANG NGHE…", "listening");
           ui.systemSpeaker.textContent = "Sẵn sàng";
@@ -199,8 +238,8 @@ const voiceManager = {
 
     const support = await AudioDecoder.isConfigSupported({
       codec: "opus",
-      sampleRate: VOICE_CONFIG.sampleRate,
-      numberOfChannels: VOICE_CONFIG.channels
+      sampleRate: 24000,
+      numberOfChannels: 1
     });
 
     if (!support.supported) {
@@ -208,7 +247,7 @@ const voiceManager = {
     }
 
     this.playbackContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: VOICE_CONFIG.sampleRate,
+      sampleRate: 24000,
       latencyHint: "interactive"
     });
 
@@ -261,8 +300,8 @@ const voiceManager = {
 
     this.decoder.configure({
       codec: "opus",
-      sampleRate: VOICE_CONFIG.sampleRate,
-      numberOfChannels: VOICE_CONFIG.channels
+      sampleRate: 24000,
+      numberOfChannels: 1
     });
   },
 
@@ -271,6 +310,9 @@ const voiceManager = {
 
     try {
       await this.initTtsDecoder();
+
+      setVoicePipeline("speaking");
+      setVoicePanel("tts", "AUDIO", "on");
 
       const chunk = new EncodedAudioChunk({
         type: "key",
@@ -300,7 +342,7 @@ const voiceManager = {
     const support =
       await AudioEncoder.isConfigSupported({
         codec: "opus",
-        sampleRate: VOICE_CONFIG.sampleRate,
+        sampleRate: 24000,
         numberOfChannels: 1,
         bitrate: VOICE_CONFIG.bitrate
       });
@@ -319,6 +361,8 @@ const voiceManager = {
         const bytes = new Uint8Array(chunk.byteLength);
         chunk.copyTo(bytes);
         this.socket.send(bytes);
+        setVoicePanel("encoder", "OPUS → " + bytes.byteLength + " B", "on");
+        setVoicePanel("server", "Đang nhận audio", "on");
       },
       error: (error) => {
         console.error("[MIMI VoiceManager] encoder:", error);
@@ -329,8 +373,8 @@ const voiceManager = {
 
     this.encoder.configure({
       codec: "opus",
-      sampleRate: VOICE_CONFIG.sampleRate,
-      numberOfChannels: VOICE_CONFIG.channels,
+      sampleRate: 24000,
+      numberOfChannels: 1,
       bitrate: VOICE_CONFIG.bitrate,
       opus: { frameDuration: 60000 }
     });
@@ -345,9 +389,9 @@ const voiceManager = {
     merged.set(input, this.pcmBuffer.length);
     this.pcmBuffer = merged;
 
-    while (this.pcmBuffer.length >= VOICE_CONFIG.frameSamples) {
-      const frame = this.pcmBuffer.slice(0, VOICE_CONFIG.frameSamples);
-      this.pcmBuffer = this.pcmBuffer.slice(VOICE_CONFIG.frameSamples);
+    while (this.pcmBuffer.length >= 1440) {
+      const frame = this.pcmBuffer.slice(0, 1440);
+      this.pcmBuffer = this.pcmBuffer.slice(1440);
       this.encodeFrame(frame);
     }
   },
@@ -357,8 +401,8 @@ const voiceManager = {
 
     const data = new AudioData({
       format: "f32",
-      sampleRate: VOICE_CONFIG.sampleRate,
-      numberOfFrames: VOICE_CONFIG.frameSamples,
+      sampleRate: 24000,
+      numberOfFrames: 1440,
       numberOfChannels: 1,
       timestamp: this.timestampUs,
       data: new Float32Array(frame)
@@ -387,7 +431,7 @@ const voiceManager = {
 
     this.audioContext =
       new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: VOICE_CONFIG.sampleRate,
+        sampleRate: 24000,
         latencyHint: "interactive"
       });
 
@@ -417,6 +461,8 @@ const voiceManager = {
     );
 
     this.audioRunning = true;
+    setVoicePanel("mic", "ON", "on");
+    setVoicePanel("audio", "PCM " + this.audioContext.sampleRate + " Hz");
     this.activity("🎤 Mic → PCM → Opus → Xiaozhi");
   },
 
@@ -433,6 +479,10 @@ const voiceManager = {
       mode: "auto"
     }));
 
+    setVoicePanel("listen", "START", "on");
+    setVoicePipeline("listening");
+    addVoiceEvent("LISTEN START → mic đang gửi audio");
+    setVoicePanel("server", "LISTENING 🎤", "on");
     this.activity("Xiaozhi ← listen/start auto");
   },
 
@@ -456,6 +506,7 @@ const voiceManager = {
       ui.systemMic.textContent = "Đang nghe";
       ui.systemSpeaker.textContent = "Sẵn sàng";
     } catch (error) {
+      setVoicePanel("server", "ERROR: " + (error?.message || error), "error");
       await this.stop();
       throw error;
     }
@@ -463,6 +514,8 @@ const voiceManager = {
 
   async stop() {
     this.audioRunning = false;
+    setVoicePanel("mic", "OFF");
+    setVoicePanel("listen", "STOP");
 
     if (
       this.socket?.readyState === WebSocket.OPEN &&
@@ -515,56 +568,333 @@ const voiceManager = {
 window.MIMIVoiceManager = voiceManager;
 
 
-function initMicIndicator() {
-  if (!ui.talk || document.getElementById("mimi-mic-indicator")) return;
+const voicePanelState = {
+  mic: "OFF",
+  websocket: "OFF",
+  session: "—",
+  audio: "—",
+  encoder: "—",
+  listen: "—",
+  stt: "—",
+  tts: "—",
+  server: "Chưa kết nối"
+};
 
-  const indicator = document.createElement("span");
-  indicator.id = "mimi-mic-indicator";
-  indicator.setAttribute("aria-label", "Trạng thái micro");
-  indicator.title = "Micro đang tắt";
+function initVoiceStatusPanel() {
+  if (document.getElementById("mimi-voice-status-panel")) return;
 
-  const parent = ui.talk.parentElement;
-  if (parent) {
-    const parentStyle = window.getComputedStyle(parent);
-    if (parentStyle.position === "static") {
-      parent.style.position = "relative";
+  const panel = document.createElement("div");
+  panel.id = "mimi-voice-status-panel";
+  panel.innerHTML = `
+    <div class="mimi-vsp-title">MIMI VOICE PIPELINE</div>
+
+    <div class="mimi-vsp-pipeline">
+      <div class="mimi-vsp-step" data-step="ready">
+        <i>●</i><span>READY</span>
+      </div>
+      <div class="mimi-vsp-arrow">↓</div>
+
+      <div class="mimi-vsp-step" data-step="listening">
+        <i>🎤</i><span>LISTENING</span>
+      </div>
+      <div class="mimi-vsp-arrow">↓</div>
+
+      <div class="mimi-vsp-step" data-step="stt">
+        <i>◉</i><span>STT / FunASR</span>
+      </div>
+      <div class="mimi-vsp-arrow">↓</div>
+
+      <div class="mimi-vsp-step" data-step="thinking">
+        <i>🧠</i><span>MIMI / AI CORE</span>
+      </div>
+      <div class="mimi-vsp-arrow">↓</div>
+
+      <div class="mimi-vsp-step" data-step="tts">
+        <i>◉</i><span>TTS</span>
+      </div>
+      <div class="mimi-vsp-arrow">↓</div>
+
+      <div class="mimi-vsp-step" data-step="speaking">
+        <i>🔊</i><span>SPEAKING</span>
+      </div>
+    </div>
+
+    <div class="mimi-vsp-current">
+      <span>TRẠNG THÁI</span>
+      <b data-vsp="server">READY</b>
+    </div>
+
+    <div class="mimi-vsp-snapshot">
+      <div class="mimi-vsp-snapshot-title">VOICE / XIAOZHI STATUS</div>
+      <pre data-vsp-snapshot>MIC          OFF
+WEBSOCKET    OFF
+SESSION      —
+AUDIO        —
+ENCODER      —
+LISTEN       —
+STT          —
+TTS          —
+--------------------
+SERVER       READY</pre>
+    </div>
+
+    <div class="mimi-vsp-grid">
+      <div><span>MIC</span><b data-vsp="mic">OFF</b></div>
+      <div><span>WEBSOCKET</span><b data-vsp="websocket">OFF</b></div>
+      <div><span>SESSION</span><b data-vsp="session">—</b></div>
+      <div><span>AUDIO</span><b data-vsp="audio">—</b></div>
+      <div><span>ENCODER</span><b data-vsp="encoder">—</b></div>
+      <div><span>LISTEN</span><b data-vsp="listen">—</b></div>
+      <div><span>STT</span><b data-vsp="stt">—</b></div>
+      <div><span>TTS</span><b data-vsp="tts">—</b></div>
+    </div>
+
+    <div class="mimi-vsp-log">
+      <div class="mimi-vsp-log-title">LIVE EVENTS</div>
+      <div data-vsp-log></div>
+    </div>
+  `;
+
+  const style = document.createElement("style");
+  style.id = "mimi-voice-status-style";
+  style.textContent = `
+    #mimi-voice-status-panel {
+      width: min(92%, 620px);
+      margin: 14px auto 0;
+      padding: 12px 14px;
+      box-sizing: border-box;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      background: rgba(8,12,24,.72);
+      color: #dbeafe;
+      font: 12px/1.35 Arial, sans-serif;
+      text-align: left;
+      backdrop-filter: blur(8px);
     }
-    parent.appendChild(indicator);
+    #mimi-voice-status-panel .mimi-vsp-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      opacity: .72;
+      margin-bottom: 10px;
+    }
+    #mimi-voice-status-panel .mimi-vsp-pipeline {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      padding: 5px 0 9px;
+    }
+    #mimi-voice-status-panel .mimi-vsp-step {
+      width: min(100%, 330px);
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 7px 11px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      background: rgba(255,255,255,.025);
+      opacity: .42;
+      transition: .15s ease;
+    }
+    #mimi-voice-status-panel .mimi-vsp-step i {
+      width: 20px;
+      text-align: center;
+      font-style: normal;
+    }
+    #mimi-voice-status-panel .mimi-vsp-step span {
+      font-weight: 700;
+      letter-spacing: .04em;
+      opacity: .9;
+    }
+    #mimi-voice-status-panel .mimi-vsp-step.active {
+      opacity: 1;
+      border-color: rgba(34,197,94,.7);
+      background: rgba(34,197,94,.10);
+      box-shadow: 0 0 14px rgba(34,197,94,.16);
+    }
+    #mimi-voice-status-panel .mimi-vsp-step.done {
+      opacity: .75;
+      border-color: rgba(59,130,246,.35);
+    }
+    #mimi-voice-status-panel .mimi-vsp-arrow {
+      line-height: 13px;
+      opacity: .35;
+    }
+    #mimi-voice-status-panel .mimi-vsp-current {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 10px;
+      margin-bottom: 9px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.045);
+    }
+    #mimi-voice-status-panel .mimi-vsp-current b {
+      color: #22c55e;
+      text-shadow: 0 0 8px rgba(34,197,94,.55);
+    }
+    #mimi-voice-status-panel .mimi-vsp-snapshot {
+      margin: 8px 0 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 9px;
+      background: rgba(0,0,0,.18);
+    }
+    #mimi-voice-status-panel .mimi-vsp-snapshot-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .1em;
+      opacity: .62;
+      margin-bottom: 6px;
+    }
+    #mimi-voice-status-panel [data-vsp-snapshot] {
+      margin: 0;
+      white-space: pre;
+      font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: #dbeafe;
+      overflow-x: auto;
+    }
+    #mimi-voice-status-panel .mimi-vsp-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 12px;
+    }
+    #mimi-voice-status-panel .mimi-vsp-grid > div,
+    #mimi-voice-status-panel .mimi-vsp-server {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+    #mimi-voice-status-panel span {
+      opacity: .58;
+    }
+    #mimi-voice-status-panel b {
+      color: #9ca3af;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #mimi-voice-status-panel b.vsp-on {
+      color: #22c55e;
+      text-shadow: 0 0 7px rgba(34,197,94,.65);
+    }
+    #mimi-voice-status-panel b.vsp-warn {
+      color: #f59e0b;
+    }
+    #mimi-voice-status-panel b.vsp-error {
+      color: #ef4444;
+    }
+    #mimi-voice-status-panel .mimi-vsp-log {
+      margin-top: 9px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255,255,255,.08);
+    }
+    #mimi-voice-status-panel .mimi-vsp-log-title {
+      font-size: 10px;
+      letter-spacing: .1em;
+      opacity: .55;
+      margin-bottom: 4px;
+    }
+    #mimi-voice-status-panel [data-vsp-log] {
+      max-height: 92px;
+      overflow: auto;
+      font-size: 10px;
+      line-height: 1.45;
+      opacity: .78;
+    }
+    #mimi-voice-status-panel .mimi-vsp-log-item {
+      padding: 1px 0;
+    }
+    @media (max-width: 520px) {
+      #mimi-voice-status-panel .mimi-vsp-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  `;
+  document.head.appendChild(style);
 
-    Object.assign(indicator.style, {
-      position: "absolute",
-      left: "calc(50% + 58px)",
-      top: "50%",
-      transform: "translateY(-50%)",
-      display: "block",
-      width: "14px",
-      height: "14px",
-      minWidth: "14px",
-      minHeight: "14px",
-      padding: "0",
-      margin: "0",
-      borderRadius: "3px",
-      background: "#555",
-      border: "1px solid rgba(255,255,255,.35)",
-      opacity: "1",
-      boxSizing: "border-box",
-      zIndex: "20",
-      boxShadow: "none",
-      transition: "background 160ms ease, box-shadow 160ms ease"
-    });
+  const host = ui.talk?.closest(".mimi-stage") || ui.stage || ui.talk?.parentElement;
+  if (host) host.appendChild(panel);
+}
+
+function setVoicePanel(key, value, tone = "") {
+  const el = document.querySelector(
+    `#mimi-voice-status-panel [data-vsp="${key}"]`
+  );
+  if (!el) return;
+
+  el.textContent = value;
+  el.classList.remove("vsp-on", "vsp-warn", "vsp-error");
+
+  if (tone) el.classList.add(`vsp-${tone}`);
+  voicePanelState[key] = value;
+  refreshVoiceSnapshot();
+}
+
+function refreshVoiceSnapshot() {
+  const el = document.querySelector("#mimi-voice-status-panel [data-vsp-snapshot]");
+  if (!el) return;
+
+  const s = voicePanelState;
+  el.textContent =
+`MIC          ${s.mic}
+WEBSOCKET    ${s.websocket}
+SESSION      ${s.session}
+AUDIO        ${s.audio}
+ENCODER      ${s.encoder}
+LISTEN       ${s.listen}
+STT          ${s.stt}
+TTS          ${s.tts}
+--------------------
+SERVER       ${s.server}`;
+}
+
+function setVoicePanelState(next = {}) {
+  for (const [key, value] of Object.entries(next)) {
+    setVoicePanel(key, value);
   }
 }
 
-function setMicIndicator(active) {
-  const indicator = document.getElementById("mimi-mic-indicator");
-  if (!indicator) return;
+function setVoicePipeline(step) {
+  const order = ["ready", "listening", "stt", "thinking", "tts", "speaking"];
+  const index = order.indexOf(step);
 
-  indicator.style.background = active ? "#22c55e" : "#555";
-  indicator.style.borderColor = active ? "#86efac" : "rgba(255,255,255,.35)";
-  indicator.style.boxShadow = active
-    ? "0 0 10px rgba(34,197,94,.95)"
-    : "none";
-  indicator.title = active ? "Micro đang bật" : "Micro đang tắt";
+  document.querySelectorAll("#mimi-voice-status-panel .mimi-vsp-step")
+    .forEach(el => {
+      const name = el.dataset.step;
+      const i = order.indexOf(name);
+      el.classList.toggle("active", name === step);
+      el.classList.toggle("done", index >= 0 && i >= 0 && i < index);
+    });
+
+  const labels = {
+    ready: "READY",
+    listening: "LISTENING 🎤",
+    stt: "STT / FunASR",
+    thinking: "MIMI / AI CORE 🧠",
+    tts: "TTS",
+    speaking: "SPEAKING 🔊"
+  };
+
+  setVoicePanel("server", labels[step] || step,
+    step === "speaking" || step === "listening" ? "on" : "");
+}
+
+function addVoiceEvent(text) {
+  const box = document.querySelector("#mimi-voice-status-panel [data-vsp-log]");
+  if (!box) return;
+
+  const item = document.createElement("div");
+  item.className = "mimi-vsp-log-item";
+  item.textContent = new Date().toLocaleTimeString("vi-VN", {
+    hour: "2-digit", minute: "2-digit", second: "2-digit"
+  }) + "  " + text;
+
+  box.prepend(item);
+  while (box.children.length > 8) box.lastElementChild.remove();
 }
 
 function setStatus(text, mode = "idle") {
@@ -626,8 +956,10 @@ function updateClock() {
 }
 updateClock();
 setInterval(updateClock, 1000);
-initMicIndicator();
-setMicIndicator(false);
+initVoiceStatusPanel();
+setVoicePanel("server", "READY", "on");
+setVoicePipeline("ready");
+addVoiceEvent("MIMI Voice UI READY");
 
 async function checkCore() {
   // Core is reached by Xiaozhi server, not directly by the browser
@@ -647,17 +979,14 @@ async function startTalk() {
   try {
     if (voiceManager.audioRunning) {
       await voiceManager.stop();
-      setMicIndicator(false);
       return;
     }
 
     ui.talk.disabled = true;
     await voiceManager.start();
-    setMicIndicator(true);
   } catch (error) {
     console.error("[MIMI Voice]", error);
     voiceManager.setState(VoiceState.ERROR);
-    setMicIndicator(false);
     setStatus("❌ VOICE ERROR", "idle");
     ui.systemMic.textContent = "Lỗi";
     addActivity("❌ Voice: " + error.message);
