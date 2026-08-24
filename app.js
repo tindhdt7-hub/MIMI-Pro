@@ -523,21 +523,36 @@ function initMicIndicator() {
   indicator.setAttribute("aria-label", "Trạng thái micro");
   indicator.title = "Micro đang tắt";
 
-  Object.assign(indicator.style, {
-    display: "inline-block",
-    width: "12px",
-    height: "12px",
-    minWidth: "12px",
-    borderRadius: "3px",
-    marginLeft: "10px",
-    verticalAlign: "middle",
-    background: "#555",
-    opacity: "0.85",
-    boxShadow: "none",
-    transition: "background 160ms ease, box-shadow 160ms ease, opacity 160ms ease"
-  });
+  const parent = ui.talk.parentElement;
+  if (parent) {
+    const parentStyle = window.getComputedStyle(parent);
+    if (parentStyle.position === "static") {
+      parent.style.position = "relative";
+    }
+    parent.appendChild(indicator);
 
-  ui.talk.insertAdjacentElement("afterend", indicator);
+    Object.assign(indicator.style, {
+      position: "absolute",
+      left: "calc(50% + 58px)",
+      top: "50%",
+      transform: "translateY(-50%)",
+      display: "block",
+      width: "14px",
+      height: "14px",
+      minWidth: "14px",
+      minHeight: "14px",
+      padding: "0",
+      margin: "0",
+      borderRadius: "3px",
+      background: "#555",
+      border: "1px solid rgba(255,255,255,.35)",
+      opacity: "1",
+      boxSizing: "border-box",
+      zIndex: "20",
+      boxShadow: "none",
+      transition: "background 160ms ease, box-shadow 160ms ease"
+    });
+  }
 }
 
 function setMicIndicator(active) {
@@ -545,10 +560,10 @@ function setMicIndicator(active) {
   if (!indicator) return;
 
   indicator.style.background = active ? "#22c55e" : "#555";
+  indicator.style.borderColor = active ? "#86efac" : "rgba(255,255,255,.35)";
   indicator.style.boxShadow = active
-    ? "0 0 8px rgba(34,197,94,.9)"
+    ? "0 0 10px rgba(34,197,94,.95)"
     : "none";
-  indicator.style.opacity = active ? "1" : "0.75";
   indicator.title = active ? "Micro đang bật" : "Micro đang tắt";
 }
 
