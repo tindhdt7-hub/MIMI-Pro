@@ -514,6 +514,44 @@ const voiceManager = {
 
 window.MIMIVoiceManager = voiceManager;
 
+
+function initMicIndicator() {
+  if (!ui.talk || document.getElementById("mimi-mic-indicator")) return;
+
+  const indicator = document.createElement("span");
+  indicator.id = "mimi-mic-indicator";
+  indicator.setAttribute("aria-label", "Trạng thái micro");
+  indicator.title = "Micro đang tắt";
+
+  Object.assign(indicator.style, {
+    display: "inline-block",
+    width: "12px",
+    height: "12px",
+    minWidth: "12px",
+    borderRadius: "3px",
+    marginLeft: "10px",
+    verticalAlign: "middle",
+    background: "#555",
+    opacity: "0.85",
+    boxShadow: "none",
+    transition: "background 160ms ease, box-shadow 160ms ease, opacity 160ms ease"
+  });
+
+  ui.talk.insertAdjacentElement("afterend", indicator);
+}
+
+function setMicIndicator(active) {
+  const indicator = document.getElementById("mimi-mic-indicator");
+  if (!indicator) return;
+
+  indicator.style.background = active ? "#22c55e" : "#555";
+  indicator.style.boxShadow = active
+    ? "0 0 8px rgba(34,197,94,.9)"
+    : "none";
+  indicator.style.opacity = active ? "1" : "0.75";
+  indicator.title = active ? "Micro đang bật" : "Micro đang tắt";
+}
+
 function setStatus(text, mode = "idle") {
   ui.status.textContent = text;
   ui.stage.classList.toggle("listening", mode === "listening");
@@ -573,6 +611,8 @@ function updateClock() {
 }
 updateClock();
 setInterval(updateClock, 1000);
+initMicIndicator();
+setMicIndicator(false);
 
 async function checkCore() {
   // Core is reached by Xiaozhi server, not directly by the browser
@@ -592,14 +632,17 @@ async function startTalk() {
   try {
     if (voiceManager.audioRunning) {
       await voiceManager.stop();
+      setMicIndicator(false);
       return;
     }
 
     ui.talk.disabled = true;
     await voiceManager.start();
+    setMicIndicator(true);
   } catch (error) {
     console.error("[MIMI Voice]", error);
     voiceManager.setState(VoiceState.ERROR);
+    setMicIndicator(false);
     setStatus("❌ VOICE ERROR", "idle");
     ui.systemMic.textContent = "Lỗi";
     addActivity("❌ Voice: " + error.message);
