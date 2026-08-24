@@ -5,9 +5,9 @@ const VOICE_CONFIG = {
   // Change only the host if the server runs on another machine.
   xiaozhiWsUrl: "ws://192.168.1.186:8000/xiaozhi/v1/",
 
-  sampleRate: 24000,
+  sampleRate: 16000,
   channels: 1,
-  frameSamples: 1440,       // 60 ms @ 24 kHz
+  frameSamples: 960,       // 60 ms @ 24 kHz
   bitrate: 24000,
 
   // This is what enables Xiaozhi's server-side VAD/interrupt path.
@@ -94,8 +94,8 @@ const voiceManager = {
           transport: "websocket",
           audio_params: {
             format: "opus",
-            sample_rate: 24000,
-            channels: 1,
+            sample_rate: VOICE_CONFIG.sampleRate,
+            channels: VOICE_CONFIG.channels,
             frame_duration: 60
           }
         }));
@@ -199,8 +199,8 @@ const voiceManager = {
 
     const support = await AudioDecoder.isConfigSupported({
       codec: "opus",
-      sampleRate: 24000,
-      numberOfChannels: 1
+      sampleRate: VOICE_CONFIG.sampleRate,
+      numberOfChannels: VOICE_CONFIG.channels
     });
 
     if (!support.supported) {
@@ -208,7 +208,7 @@ const voiceManager = {
     }
 
     this.playbackContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 24000,
+      sampleRate: VOICE_CONFIG.sampleRate,
       latencyHint: "interactive"
     });
 
@@ -261,8 +261,8 @@ const voiceManager = {
 
     this.decoder.configure({
       codec: "opus",
-      sampleRate: 24000,
-      numberOfChannels: 1
+      sampleRate: VOICE_CONFIG.sampleRate,
+      numberOfChannels: VOICE_CONFIG.channels
     });
   },
 
@@ -300,7 +300,7 @@ const voiceManager = {
     const support =
       await AudioEncoder.isConfigSupported({
         codec: "opus",
-        sampleRate: 24000,
+        sampleRate: VOICE_CONFIG.sampleRate,
         numberOfChannels: 1,
         bitrate: VOICE_CONFIG.bitrate
       });
@@ -329,8 +329,8 @@ const voiceManager = {
 
     this.encoder.configure({
       codec: "opus",
-      sampleRate: 24000,
-      numberOfChannels: 1,
+      sampleRate: VOICE_CONFIG.sampleRate,
+      numberOfChannels: VOICE_CONFIG.channels,
       bitrate: VOICE_CONFIG.bitrate,
       opus: { frameDuration: 60000 }
     });
@@ -345,9 +345,9 @@ const voiceManager = {
     merged.set(input, this.pcmBuffer.length);
     this.pcmBuffer = merged;
 
-    while (this.pcmBuffer.length >= 1440) {
-      const frame = this.pcmBuffer.slice(0, 1440);
-      this.pcmBuffer = this.pcmBuffer.slice(1440);
+    while (this.pcmBuffer.length >= VOICE_CONFIG.frameSamples) {
+      const frame = this.pcmBuffer.slice(0, VOICE_CONFIG.frameSamples);
+      this.pcmBuffer = this.pcmBuffer.slice(VOICE_CONFIG.frameSamples);
       this.encodeFrame(frame);
     }
   },
@@ -357,8 +357,8 @@ const voiceManager = {
 
     const data = new AudioData({
       format: "f32",
-      sampleRate: 24000,
-      numberOfFrames: 1440,
+      sampleRate: VOICE_CONFIG.sampleRate,
+      numberOfFrames: VOICE_CONFIG.frameSamples,
       numberOfChannels: 1,
       timestamp: this.timestampUs,
       data: new Float32Array(frame)
@@ -387,7 +387,7 @@ const voiceManager = {
 
     this.audioContext =
       new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 24000,
+        sampleRate: VOICE_CONFIG.sampleRate,
         latencyHint: "interactive"
       });
 
