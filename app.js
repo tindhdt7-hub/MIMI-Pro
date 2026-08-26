@@ -5,6 +5,11 @@ const VOICE_CONFIG = {
   // Change only the host if the server runs on another machine.
   xiaozhiWsUrl: "ws://192.168.1.186:8000/xiaozhi/v1/",
 
+  // MIMI AI Core LOCAL on the same laptop/LAN.
+  // Web -> Xiaozhi -> MIMI AI Core LOCAL.
+  // No Cloud AI is used by this voice path.
+  localCoreUrl: "http://192.168.1.186:3000/",
+
   sampleRate: 24000,
   channels: 1,
   frameSamples: 1440,       // 60 ms @ 24 kHz
@@ -962,11 +967,12 @@ setVoicePipeline("ready");
 addVoiceEvent("MIMI Voice UI READY");
 
 async function checkCore() {
-  // Core is reached by Xiaozhi server, not directly by the browser
-  // voice path. This only checks the public health endpoint.
+  // Voice path is LOCAL:
+  // MIMI PRO Web -> Xiaozhi -> MIMI AI Core LOCAL.
+  // Do NOT check or depend on the Cloudflare/Cloud AI endpoint here.
   try {
     const response = await fetch(
-      "https://mimi-pro-core.tindhdt7.workers.dev/",
+      VOICE_CONFIG.localCoreUrl,
       { cache: "no-store" }
     );
     setCoreState(response.ok);
