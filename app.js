@@ -46,6 +46,7 @@ let voicesReady = false;
 // iPhone/Safari đôi khi không tự kết thúc Speech Recognition.
 // Watchdog này đảm bảo mic không bị kẹt ở trạng thái "đang nghe".
 let recognitionWatchdog = null;
+let recognitionSilenceTimer = null;
 let recognitionSession = 0;
 
 function clearRecognitionWatchdog() {
@@ -53,6 +54,37 @@ function clearRecognitionWatchdog() {
     clearTimeout(recognitionWatchdog);
     recognitionWatchdog = null;
   }
+}
+
+function clearRecognitionSilenceTimer() {
+  if (recognitionSilenceTimer) {
+    clearTimeout(recognitionSilenceTimer);
+    recognitionSilenceTimer = null;
+  }
+}
+
+// iPhone/Safari có thể không phát onend đúng lúc.
+// Vì vậy MIMI tự kết thúc khi không còn nhận thêm chữ trong ~1.6 giây.
+function armRecognitionSilenceTimer() {
+  clearRecognitionSilenceTimer();
+  const session = recognitionSession;
+  recognitionSilenceTimer = setTimeout(() => {
+    if (session !== recognitionSession) return;
+    if (!isListening || isProcessing) return;
+
+    const text = latestTranscript.trim();
+    if (!text) return;
+
+    addActivity("⏹ MIMI tự dừng nghe sau khi bạn nói xong", "normal");
+    manualStopRequested = false;
+    recognitionSession++;
+    try { recognition.stop(); } catch {}
+
+    // Không phụ thuộc vào onend/onresult cuối của Safari.
+    setTimeout(() => {
+      if (!isProcessing && text) processUserText(text);
+    }, 180);
+  }, 1600);
 }
 
 // Nút DỪNG NGHE thật trong index.html.
@@ -72,6 +104,7 @@ function stopListeningManually() {
   if (!recognition || !isListening) return;
 
   clearRecognitionWatchdog();
+  clearRecognitionSilenceTimer();
   clearTimeout(manualStopTimer);
   manualStopRequested = true;
   recognitionSession++;
@@ -493,8 +526,10 @@ if (SpeechRecognition) {
   // Chủ động stop để tránh trạng thái "đang nghe" kéo dài.
   recognition.onspeechend = () => {
     clearRecognitionWatchdog();
-    if (isListening && !isProcessing) {
-      try { recognition.stop(); } catch {}
+    // Đừng stop ngay: iOS đôi khi phát onspeechend giữa câu.
+    // Cho timer chờ thêm 1.6 giây để lấy phần cuối câu.
+    if (isListening && !isProcessing && latestTranscript.trim()) {
+      armRecognitionSilenceTimer();
     }
   };
 
@@ -554,6 +589,9 @@ if (SpeechRecognition) {
 
     latestTranscript = text;
 
+    // Mỗi lần có thêm chữ thì reset bộ đếm im lặng.
+    if (!finalText) armRecognitionSilenceTimer();
+
     if (!finalText) {
       ui.userBubble.textContent = text;
       ui.userBubble.classList.remove("hidden");
@@ -565,6 +603,7 @@ if (SpeechRecognition) {
 
   recognition.onerror = (event) => {
     clearRecognitionWatchdog();
+    clearRecognitionSilenceTimer();
     recognitionSession++;
     isListening = false;
     showStopListeningButton(false);
@@ -587,9 +626,20 @@ if (SpeechRecognition) {
 
   recognition.onend = () => {
     clearRecognitionWatchdog();
+    clearRecognitionSilenceTimer();
     recognitionSession++;
     isListening = false;
     showStopListeningButton(false);
+
+    // Nếu Safari kết thúc phiên nhưng chưa phát final result,
+    // vẫn xử lý transcript cuối cùng.
+    if (latestTranscript.trim() && !isProcessing && !manualStopRequested) {
+      const text = latestTranscript.trim();
+      setTimeout(() => {
+        if (!isProcessing) processUserText(text);
+      }, 80);
+      return;
+    }
 
     // Nếu đã có câu và người dùng vừa bấm DỪNG, chờ handler 250 ms xử lý.
     if (manualStopRequested && latestTranscript.trim() && !isProcessing) return;
@@ -624,6 +674,7 @@ function startTalk() {
 
   if (isListening) {
     clearRecognitionWatchdog();
+    clearRecognitionSilenceTimer();
     recognitionSession++;
     try { recognition.stop(); } catch {}
     showStopListeningButton(false);
