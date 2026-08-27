@@ -120,47 +120,85 @@ async function askMimi(text) {
     "MIMI chưa có câu trả lời.";
 }
 
+function getSpeechVoices() {
+  if (!("speechSynthesis" in window)) return [];
+  return speechSynthesis.getVoices() || [];
+}
+
 function chooseVietnameseVoice() {
-  if (!("speechSynthesis" in window)) return null;
+  const voices = getSpeechVoices();
 
-  const voices = speechSynthesis.getVoices();
-
-  // Ưu tiên tuyệt đối voice tiếng Việt.
+  // Ưu tiên tuyệt đối giọng tiếng Việt.
   return (
     voices.find(v => /^vi(-|_)/i.test(String(v.lang || ""))) ||
-    voices.find(v =>
-      /Vietnamese|Tiếng Việt|Vietnam/i.test(String(v.name || ""))
-    ) ||
+    voices.find(v => /Vietnamese|Tiếng Việt|Vietnam/i.test(String(v.name || ""))) ||
     null
   );
 }
 
-function speak(text) {
+function waitForVietnameseVoice(timeout = 3000) {
+  return new Promise(resolve => {
+    const first = chooseVietnameseVoice();
+    if (first) {
+      resolve(first);
+      return;
+    }
+
+    if (!("speechSynthesis" in window)) {
+      resolve(null);
+      return;
+    }
+
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      speechSynthesis.removeEventListener("voiceschanged", check);
+      resolve(chooseVietnameseVoice());
+    };
+
+    const check = () => {
+      const voice = chooseVietnameseVoice();
+      if (voice) finish();
+    };
+
+    const timer = setTimeout(finish, timeout);
+    speechSynthesis.addEventListener("voiceschanged", check);
+    speechSynthesis.getVoices();
+    setTimeout(check, 100);
+  });
+}
+
+async function speak(text) {
   if (!("speechSynthesis" in window)) {
     ui.systemSpeaker.textContent = "Không hỗ trợ TTS";
+    addActivity("⚠️ Trình duyệt không hỗ trợ đọc văn bản");
     return;
   }
 
-  speechSynthesis.cancel();
+  const value = String(text || "").trim();
+  if (!value) return;
 
-  const utterance = new SpeechSynthesisUtterance(String(text));
-  utterance.lang = "vi-VN";
+  // iPhone/Safari có thể giữ speechSynthesis ở trạng thái paused.
+  speechSynthesis.cancel();
+  speechSynthesis.resume();
+
+  const voice = await waitForVietnameseVoice(3500);
+
+  if (!voice) {
+    ui.systemSpeaker.textContent = "Thiếu giọng tiếng Việt";
+    addActivity("⚠️ Không tìm thấy giọng TTS tiếng Việt trên thiết bị");
+    setStatus("⚠️ Chưa có giọng tiếng Việt", "idle");
+    return;
+  }
+
+  const utterance = new SpeechSynthesisUtterance(value);
+  utterance.voice = voice;
+  utterance.lang = voice.lang || "vi-VN";
   utterance.rate = 0.95;
   utterance.pitch = 1;
   utterance.volume = 1;
-
-  const voice = chooseVietnameseVoice();
-
-  // Nếu máy có voice Việt thì bắt buộc dùng voice Việt.
-  if (voice) {
-    utterance.voice = voice;
-    utterance.lang = voice.lang || "vi-VN";
-  } else {
-    // Không được rơi sang voice tiếng Anh.
-    ui.systemSpeaker.textContent = "Thiếu giọng tiếng Việt";
-    addActivity("⚠️ Máy chưa có Vietnamese TTS (vi-VN)");
-    return;
-  }
 
   utterance.onstart = () => {
     setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
@@ -172,22 +210,35 @@ function speak(text) {
     setStatus("Mình đang sẵn sàng", "idle");
   };
 
-  utterance.onerror = (event) => {
+  utterance.onerror = event => {
     console.error("TTS ERROR:", event);
     ui.systemSpeaker.textContent = "TTS lỗi";
     setStatus("❌ Không phát được giọng tiếng Việt", "idle");
   };
 
+  // Gọi resume ngay trước speak để ổn định hơn trên iOS.
+  speechSynthesis.resume();
   speechSynthesis.speak(utterance);
+
+  // Một số bản Safari/iOS cần resume thêm một lần sau khi queue.
+  setTimeout(() => {
+    if (speechSynthesis.speaking) speechSynthesis.resume();
+  }, 100);
 }
 
 if ("speechSynthesis" in window) {
   speechSynthesis.onvoiceschanged = () => {
     voicesReady = true;
+    const voice = chooseVietnameseVoice();
+    if (voice) {
+      ui.systemSpeaker.textContent = "Sẵn sàng";
+      console.log("MIMI Vietnamese TTS:", voice.name, voice.lang);
+    }
   };
 }
 
-// Chrome/Windows tải danh sách TTS bất đồng bộ.
+// Chrome/Windows/iPhone Safari tải danh sách TTS bất đồng bộ.
+
 if ("speechSynthesis" in window) {
   speechSynthesis.addEventListener("voiceschanged", () => {
     console.log(
