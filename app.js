@@ -3,9 +3,8 @@ const CONFIG = {
   localCoreUrl: "http://192.168.1.186:3000",
   language: "vi-VN",
 
-  // MIMI PRO WEB → Xiaozhi/Edge TTS bridge.
-  // Leave empty until the Xiaozhi server TTS endpoint is confirmed.
-  // Browser TTS below remains the automatic fallback.
+  // Điền endpoint TTS của Xiaozhi khi server có endpoint HTTP audio.
+  // Để trống = dùng Browser TTS.
   xiaozhiTtsUrl: ""
 };
 
@@ -133,10 +132,20 @@ function getSpeechVoices() {
 function chooseVietnameseVoice() {
   const voices = getSpeechVoices();
 
-  // Ưu tiên tuyệt đối giọng tiếng Việt.
-  return (
+  // 1) Ưu tiên giọng tiếng Việt thật.
+  const viVoice =
     voices.find(v => /^vi(-|_)/i.test(String(v.lang || ""))) ||
-    voices.find(v => /Vietnamese|Tiếng Việt|Vietnam/i.test(String(v.name || ""))) ||
+    voices.find(v => /Vietnamese|Tiếng Việt|Vietnam|HoaiMy|NamMinh/i.test(String(v.name || "")));
+
+  if (viVoice) return viVoice;
+
+  // 2) Không có voice vi-VN trên máy:
+  //    chọn voice trình duyệt tốt nhất để MIMI vẫn nói được,
+  //    thay vì báo "Chưa có giọng tiếng Việt" rồi im lặng.
+  return (
+    voices.find(v => /Microsoft/i.test(String(v.name || ""))) ||
+    voices.find(v => /Google/i.test(String(v.name || ""))) ||
+    voices[0] ||
     null
   );
 }
@@ -191,16 +200,10 @@ async function speakWithXiaozhi(text) {
       cache: "no-store"
     });
 
-    if (!response.ok) {
-      console.warn("Xiaozhi TTS HTTP:", response.status);
-      return false;
-    }
+    if (!response.ok) return false;
 
     const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-    if (!contentType.includes("audio/")) {
-      console.warn("Xiaozhi TTS không trả về audio:", contentType);
-      return false;
-    }
+    if (!contentType.includes("audio/")) return false;
 
     const blob = await response.blob();
     const audioUrl = URL.createObjectURL(blob);
@@ -220,7 +223,7 @@ async function speakWithXiaozhi(text) {
     setStatus("Mình đang sẵn sàng", "idle");
     return true;
   } catch (error) {
-    console.warn("Xiaozhi TTS chưa sẵn sàng:", error);
+    console.warn("Xiaozhi TTS:", error);
     return false;
   }
 }
@@ -242,15 +245,22 @@ async function speak(text) {
   const voice = await waitForVietnameseVoice(3500);
 
   if (!voice) {
-    ui.systemSpeaker.textContent = "Thiếu giọng tiếng Việt";
-    addActivity("⚠️ Không tìm thấy giọng TTS tiếng Việt trên thiết bị");
-    setStatus("⚠️ Chưa có giọng tiếng Việt", "idle");
+    ui.systemSpeaker.textContent = "Thiếu TTS";
+    addActivity("⚠️ Thiết bị không có giọng đọc nào");
+    setStatus("⚠️ Không có TTS trên thiết bị", "idle");
     return;
+  }
+
+  // Nếu voice tìm được không phải vi-VN, vẫn đọc được câu trả lời.
+  // Không báo lỗi "Chưa có giọng tiếng Việt" nữa.
+  if (!/^vi(-|_)/i.test(String(voice.lang || ""))) {
+    ui.systemSpeaker.textContent = "TTS dự phòng";
+    addActivity(`⚠️ Không có voice vi-VN, dùng ${voice.name || "voice hệ thống"}`);
   }
 
   const utterance = new SpeechSynthesisUtterance(value);
   utterance.voice = voice;
-  utterance.lang = voice.lang || "vi-VN";
+  utterance.lang = /^vi(-|_)/i.test(String(voice.lang || "")) ? voice.lang : CONFIG.language;
   utterance.rate = 0.95;
   utterance.pitch = 1;
   utterance.volume = 1;
@@ -297,9 +307,8 @@ if ("speechSynthesis" in window) {
 if ("speechSynthesis" in window) {
   speechSynthesis.addEventListener("voiceschanged", () => {
     console.log(
-      "MIMI Vietnamese voices:",
+      "MIMI available voices:",
       speechSynthesis.getVoices()
-        .filter(v => /^vi(-|_)/i.test(String(v.lang || "")))
         .map(v => `${v.name} (${v.lang})`)
     );
   });
@@ -357,7 +366,7 @@ if (SpeechRecognition) {
       addActivity(`MIMI: ${answer}`);
       setCoreState(true);
       // Ưu tiên Xiaozhi/Edge TTS nếu đã cấu hình endpoint.
-      // Nếu chưa có hoặc lỗi → giữ nguyên Browser TTS hiện tại.
+      // Nếu chưa có hoặc endpoint lỗi → Browser TTS vẫn hoạt động.
       const usedXiaozhiTts = await speakWithXiaozhi(answer);
       if (!usedXiaozhiTts) {
         speak(answer);
