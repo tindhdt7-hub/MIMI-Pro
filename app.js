@@ -1,5 +1,6 @@
 const CONFIG = {
-  workerUrl: "https://mimi-pro-core.tindhdt7.workers.dev/chat",
+  // MIMI PRO WEB: LOCAL AI ONLY — không dùng Cloud AI.
+  localCoreUrl: "http://192.168.1.186:3000",
   language: "vi-VN"
 };
 
@@ -89,7 +90,7 @@ function setCoreState(online) {
 
 async function checkCore() {
   try {
-    const response = await fetch(CONFIG.workerUrl, {
+    const response = await fetch(CONFIG.localCoreUrl + "/", {
       method: "OPTIONS",
       cache: "no-store"
     });
@@ -102,10 +103,10 @@ async function checkCore() {
 }
 
 async function askMimi(text) {
-  const response = await fetch(CONFIG.workerUrl, {
+  const response = await fetch(CONFIG.localCoreUrl + "/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: text }),
+    body: JSON.stringify({ message: text, provider: "local" }),
     cache: "no-store"
   });
 
