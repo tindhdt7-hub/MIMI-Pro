@@ -55,6 +55,59 @@ function clearRecognitionWatchdog() {
   }
 }
 
+// Nút DỪNG NGHE: đặc biệt cho iPhone/Safari khi Speech Recognition bị giữ mic.
+// Tạo bằng JS để không phải xoá/sửa bố cục HTML hiện tại.
+const stopListeningButton = document.createElement("button");
+stopListeningButton.type = "button";
+stopListeningButton.id = "stopListeningButton";
+stopListeningButton.textContent = "⏹ Dừng nghe";
+stopListeningButton.setAttribute("aria-label", "Dừng nghe");
+Object.assign(stopListeningButton.style, {
+  display: "none",
+  margin: "10px auto 0",
+  padding: "11px 20px",
+  borderRadius: "999px",
+  border: "1px solid rgba(190,150,255,.75)",
+  background: "rgba(80,45,150,.9)",
+  color: "#fff",
+  fontSize: "15px",
+  fontWeight: "700",
+  cursor: "pointer",
+  boxShadow: "0 0 18px rgba(150,90,255,.35)",
+  position: "relative",
+  zIndex: "20"
+});
+
+if (ui.talk && ui.talk.parentElement) {
+  ui.talk.insertAdjacentElement("afterend", stopListeningButton);
+}
+
+function showStopListeningButton(show) {
+  // Chỉ hiện khi MIMI thật sự đang nghe.
+  stopListeningButton.style.display =
+    show && isListening ? "block" : "none";
+}
+
+function stopListeningManually() {
+  if (!recognition || !isListening) return;
+
+  clearRecognitionWatchdog();
+  recognitionSession++;
+  addActivity("⏹ Bạn đã dừng nghe", "normal");
+
+  try {
+    recognition.stop();
+  } catch (error) {
+    console.warn("Recognition stop:", error);
+    isListening = false;
+    setStatus("MIMI đã sẵn sàng", "idle");
+    ui.systemMic.textContent = "Sẵn sàng";
+    showStopListeningButton(false);
+  }
+}
+
+stopListeningButton.addEventListener("click", stopListeningManually);
+
 function setStatus(text, mode = "idle") {
   ui.status.textContent = text;
   ui.stage.classList.toggle("listening", mode === "listening");
@@ -416,6 +469,7 @@ if (SpeechRecognition) {
     isListening = true;
     setStatus("🎤 MIMI ĐANG NGHE…", "listening");
     ui.systemMic.textContent = "Đang nghe";
+    showStopListeningButton(true);
 
     // Không cho iPhone giữ microphone vô hạn.
     clearRecognitionWatchdog();
@@ -507,6 +561,7 @@ if (SpeechRecognition) {
     clearRecognitionWatchdog();
     recognitionSession++;
     isListening = false;
+    showStopListeningButton(false);
     ui.talk.disabled = false;
     ui.systemMic.textContent = "Sẵn sàng";
 
@@ -528,6 +583,7 @@ if (SpeechRecognition) {
     clearRecognitionWatchdog();
     recognitionSession++;
     isListening = false;
+    showStopListeningButton(false);
     if (!isProcessing) {
       ui.talk.disabled = false;
       ui.systemMic.textContent = "Sẵn sàng";
@@ -559,6 +615,7 @@ function startTalk() {
     clearRecognitionWatchdog();
     recognitionSession++;
     try { recognition.stop(); } catch {}
+    showStopListeningButton(false);
     return;
   }
 
