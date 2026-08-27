@@ -1,687 +1,72 @@
-const isVoiceManager = true;
-
-const VOICE_CONFIG = {
-  // Xiaozhi server listens on 8000 in the supplied ZIP.
-  // Change only the host if the server runs on another machine.
-  xiaozhiWsUrl: "ws://192.168.1.186:8000/xiaozhi/v1/",
-
-  sampleRate: 24000,
-  channels: 1,
-  frameSamples: 1440,       // 60 ms @ 24 kHz
-  bitrate: 24000,
-
-  // This is what enables Xiaozhi's server-side VAD/interrupt path.
-  listenMode: "auto",
-
-  // MIMI Local AI — keep Cloud AI out of the Web chat path for now.
-  // Use the laptop LAN IP so MIMI PRO Web can reach Core from another device.
-  // MIMI AI Core chạy local trên chính laptop này.
-  // Web sẽ gọi đúng endpoint: http://127.0.0.1:3000/api/chat
+const CONFIG = {
+  // MIMI PRO Web -> MIMI AI Core Local on this PC.
+  // Do NOT use Cloud Worker / Gemini for this voice test.
   localCoreUrl: "http://127.0.0.1:3000",
-  localProvider: "local"
+  language: "vi-VN"
 };
 
-const VoiceState = Object.freeze({
-  IDLE: "IDLE",
-  CONNECTING: "CONNECTING",
-  LISTENING: "LISTENING",
-  SPEAKING: "SPEAKING",
-  INTERRUPTED: "INTERRUPTED",
-  ERROR: "ERROR"
-});
-
-const voiceManager = {
-  socket: null,
-  sessionId: null,
-
-  mediaStream: null,
-  audioContext: null,
-  sourceNode: null,
-  processorNode: null,
-  encoder: null,
-
-  decoder: null,
-  decoderTimestampUs: 0,
-  playbackContext: null,
-  nextPlayTime: 0,
-
-  pcmBuffer: new Float32Array(0),
-  timestampUs: 0,
-  audioRunning: false,
-  state: VoiceState.IDLE,
-
-  // Local-first response path.
-  localReplyPending: false,
-  localReplyText: "",
-
-  // Browser Vietnamese STT fallback/test path.
-  browserRecognition: null,
-  browserListening: false,
-
-  setState(next) {
-    this.state = next;
-    console.log("[MIMI VoiceManager]", next);
-  },
-
-  activity(text) {
-    addActivity(text);
-  },
-
-  makeWsUrl() {
-    const id = () =>
-      crypto.randomUUID
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-
-    const url = new URL(VOICE_CONFIG.xiaozhiWsUrl);
-    url.searchParams.set("device-id", `mimi-web-${id()}`);
-    url.searchParams.set("client-id", `mimi-web-client-${id()}`);
-    return url.toString();
-  },
-
-  async connect() {
-    if (this.socket?.readyState === WebSocket.OPEN) return;
-
-    this.setState(VoiceState.CONNECTING);
-
-    await new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.makeWsUrl());
-      ws.binaryType = "arraybuffer";
-      this.socket = ws;
-
-      const timeout = setTimeout(() => {
-        try { ws.close(); } catch {}
-        reject(new Error("Xiaozhi WebSocket timeout"));
-      }, 10000);
-
-      ws.onopen = () => {
-        this.activity("Xiaozhi WS mở");
-
-        // aec:true is important: the supplied Xiaozhi server uses
-        // server-side AEC + VAD to interrupt TTS when the user speaks.
-        ws.send(JSON.stringify({
-          type: "hello",
-          version: 1,
-          features: {
-            mcp: true,
-            aec: true
-          },
-          transport: "websocket",
-          audio_params: {
-            format: "opus",
-            sample_rate: 24000,
-            channels: 1,
-            frame_duration: 60
-          }
-        }));
-      };
-
-      ws.onmessage = async (event) => {
-        if (typeof event.data !== "string") {
-          if (this.localReplyPending || this.localReplyText) {
-            return;
-          }
-          await this.handleTtsOpus(event.data);
-          return;
-        }
-
-        let msg;
-        try {
-          msg = JSON.parse(event.data);
-        } catch {
-          this.activity("Xiaozhi → text non-JSON");
-          return;
-        }
-
-        console.log("[Xiaozhi]", msg);
-
-        if (msg.type === "hello") {
-          clearTimeout(timeout);
-          this.sessionId = msg.session_id || null;
-          this.activity("Xiaozhi hello OK");
-          resolve();
-          return;
-        }
-
-        await this.handleEvent(msg);
-      };
-
-      ws.onerror = () => {
-        clearTimeout(timeout);
-        reject(new Error("Không kết nối được Xiaozhi WebSocket"));
-      };
-
-      ws.onclose = () => {
-        clearTimeout(timeout);
-        this.socket = null;
-        this.sessionId = null;
-        if (this.state !== VoiceState.ERROR) {
-          this.setState(VoiceState.IDLE);
-        }
-        this.activity("Xiaozhi WS đóng");
-      };
-    });
-  },
-
-  async handleEvent(msg) {
-    switch (msg.type) {
-      case "stt":
-        if (msg.text) {
-          showConversation(msg.text);
-          addActivity("Bạn: " + msg.text);
-          ui.systemMic.textContent = "Đã nghe";
-
-          // IMPORTANT:
-          // Xiaozhi remains the voice/STT transport.
-          // MIMI AI Core Local is the brain for the actual answer.
-          await this.askLocalCore(msg.text);
-        }
-        break;
-
-      case "tts":
-        // Local-first mode: the answer is generated by MIMI AI Core Local
-        // and spoken by browser TTS. Ignore Xiaozhi's separate TTS event
-        // so the Web does not speak a second/cloud answer.
-        if (this.localReplyPending || this.localReplyText) {
-          if (msg.state === "start" || msg.state === "sentence_start") {
-            return;
-          }
-        }
-
-        if (msg.state === "start") {
-          this.setState(VoiceState.SPEAKING);
-          setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
-          ui.systemSpeaker.textContent = "Đang nói";
-        } else if (msg.state === "sentence_start") {
-          if (msg.text) {
-            ui.mimiBubble.textContent = msg.text;
-            ui.mimiBubble.classList.remove("hidden");
-            addActivity("MIMI: " + msg.text);
-          }
-        } else if (msg.state === "stop") {
-          this.setState(VoiceState.LISTENING);
-          setStatus("🎤 MIMI ĐANG NGHE…", "listening");
-          ui.systemSpeaker.textContent = "Sẵn sàng";
-        }
-        break;
-
-      case "llm":
-        // Local-first: the browser calls MIMI AI Core directly after STT.
-        // Keep this event for compatibility/diagnostics only.
-        addVoiceEvent("Xiaozhi LLM EVENT → Local Core đang được ưu tiên");
-        break;
-
-      case "error":
-        this.activity("❌ Xiaozhi: " + (msg.message || msg.error || "error"));
-        break;
-
-      default:
-        this.activity("Xiaozhi → " + (msg.type || "event"));
-    }
-  },
-
-  async askLocalCore(userText) {
-    const url = `${VOICE_CONFIG.localCoreUrl}/api/chat`;
-
-    this.localReplyPending = true;
-    setStatus("🧠 MIMI LOCAL AI ĐANG SUY NGHĨ…", "idle");
-    addActivity("Local AI → Qwen đang xử lý");
-    setVoicePanel("server", "LOCAL AI", "on");
-
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          message: userText,
-          provider: VOICE_CONFIG.localProvider
-        }),
-        cache: "no-store"
-      });
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(
-          data?.error ||
-          data?.details?.error?.message ||
-          `Local AI HTTP ${response.status}`
-        );
-      }
-
-      const reply =
-        data?.reply ||
-        data?.response ||
-        data?.message ||
-        data?.content ||
-        "";
-
-      if (!reply) {
-        throw new Error("MIMI AI Core không trả về reply.");
-      }
-
-      this.localReplyText = reply;
-
-      showConversation(userText, reply);
-      ui.mimiBubble.textContent = reply;
-      ui.mimiBubble.classList.remove("hidden");
-      addActivity("MIMI Local: " + reply);
-
-      // Browser TTS is used for this Local-only Web test.
-      // This prevents the old Xiaozhi TTS/cloud reply from being the voice output.
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-
-        const utterance = new SpeechSynthesisUtterance(reply);
-        utterance.lang = "vi-VN";
-        utterance.rate = 1.0;
-
-        // Prefer an actual Vietnamese voice when the device/browser exposes one.
-        const voices = window.speechSynthesis.getVoices();
-        const viVoice =
-          voices.find(v => /^vi(-|_)/i.test(v.lang)) ||
-          voices.find(v => /Vietnam|Vietnamese|Tiếng Việt/i.test(v.name));
-
-        if (viVoice) {
-          utterance.voice = viVoice;
-          addActivity("🔊 TTS: " + viVoice.name + " (" + viVoice.lang + ")");
-        } else {
-          addActivity("🔊 TTS: vi-VN (voice mặc định của thiết bị)");
-        }
-        utterance.pitch = 1.0;
-        utterance.volume = 1.0;
-
-        utterance.onstart = () => {
-          setVoicePipeline("speaking");
-          setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
-          ui.systemSpeaker.textContent = "Đang nói";
-        };
-
-        utterance.onend = () => {
-          setVoicePipeline("listening");
-          this.localReplyPending = false;
-          this.setState(VoiceState.LISTENING);
-          setStatus("🎤 MIMI ĐANG NGHE…", "listening");
-          ui.systemSpeaker.textContent = "Sẵn sàng";
-        };
-
-        utterance.onerror = (error) => {
-          console.error("[MIMI Local TTS]", error);
-          this.localReplyPending = false;
-          addActivity("❌ Local TTS: " + (error?.error || "error"));
-          this.setState(VoiceState.LISTENING);
-          setStatus("🎤 MIMI ĐANG NGHE…", "listening");
-        };
-
-        speechSynthesis.speak(utterance);
-      } else {
-        this.localReplyPending = false;
-        setVoicePipeline("listening");
-        this.setState(VoiceState.LISTENING);
-        setStatus("🎤 MIMI ĐANG NGHE…", "listening");
-      }
-
-    } catch (error) {
-      this.localReplyPending = false;
-      console.error("[MIMI Local AI]", error);
-      addActivity("❌ Local AI: " + error.message);
-      setVoicePanel("server", "LOCAL ERROR", "error");
-      setStatus("❌ LOCAL AI ERROR", "idle");
-      ui.systemSpeaker.textContent = "Lỗi";
-    }
-  },
-
-  async initTtsDecoder() {
-    if (this.decoder) return;
-
-    if (!("AudioDecoder" in window) || !("EncodedAudioChunk" in window)) {
-      throw new Error(
-        "Trình duyệt không hỗ trợ WebCodecs AudioDecoder. " +
-        "Cần bật/ dùng trình duyệt có AudioDecoder Opus."
-      );
-    }
-
-    const support = await AudioDecoder.isConfigSupported({
-      codec: "opus",
-      sampleRate: 24000,
-      numberOfChannels: 1
-    });
-
-    if (!support.supported) {
-      throw new Error("AudioDecoder không hỗ trợ Opus 24 kHz mono");
-    }
-
-    this.playbackContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 24000,
-      latencyHint: "interactive"
-    });
-
-    await this.playbackContext.resume();
-    this.nextPlayTime = this.playbackContext.currentTime;
-
-    this.decoder = new AudioDecoder({
-      output: (audioData) => {
-        try {
-          const frames = audioData.numberOfFrames;
-          const buffer = this.playbackContext.createBuffer(
-            1,
-            frames,
-            audioData.sampleRate
-          );
-
-          const pcm = new Float32Array(frames);
-          audioData.copyTo(pcm, {
-            planeIndex: 0,
-            format: "f32"
-          });
-
-          buffer.copyToChannel(pcm, 0);
-
-          const source = this.playbackContext.createBufferSource();
-          source.buffer = buffer;
-          source.connect(this.playbackContext.destination);
-
-          const startAt = Math.max(
-            this.nextPlayTime,
-            this.playbackContext.currentTime + 0.01
-          );
-
-          source.start(startAt);
-          this.nextPlayTime =
-            startAt + buffer.duration;
-
-          audioData.close();
-        } catch (error) {
-          console.error("[MIMI VoiceManager] TTS playback:", error);
-          try { audioData.close(); } catch {}
-        }
-      },
-
-      error: (error) => {
-        console.error("[MIMI VoiceManager] TTS decoder:", error);
-        this.activity("❌ TTS decoder: " + (error?.message || error));
-      }
-    });
-
-    this.decoder.configure({
-      codec: "opus",
-      sampleRate: 24000,
-      numberOfChannels: 1
-    });
-  },
-
-  async handleTtsOpus(arrayBuffer) {
-    if (!arrayBuffer || !arrayBuffer.byteLength) return;
-
-    try {
-      await this.initTtsDecoder();
-
-      const chunk = new EncodedAudioChunk({
-        type: "key",
-        timestamp: this.decoderTimestampUs,
-        data: new Uint8Array(arrayBuffer)
-      });
-
-      this.decoderTimestampUs += 60000;
-      this.decoder.decode(chunk);
-    } catch (error) {
-      this.activity("❌ TTS audio: " + error.message);
-    }
-  },
-
-  stopTtsPlayback() {
-    this.nextPlayTime =
-      this.playbackContext?.currentTime || 0;
-
-    try { this.decoder?.reset(); } catch {}
-  },
-
-  async startEncoder() {
-    if (!("AudioEncoder" in window) || !("AudioData" in window)) {
-      throw new Error("Trình duyệt không hỗ trợ WebCodecs AudioEncoder");
-    }
-
-    const support =
-      await AudioEncoder.isConfigSupported({
-        codec: "opus",
-        sampleRate: 24000,
-        numberOfChannels: 1,
-        bitrate: VOICE_CONFIG.bitrate
-      });
-
-    if (!support.supported) {
-      throw new Error("AudioEncoder không hỗ trợ Opus 24 kHz mono");
-    }
-
-    this.encoder = new AudioEncoder({
-      output: (chunk) => {
-        if (
-          !this.audioRunning ||
-          this.socket?.readyState !== WebSocket.OPEN
-        ) return;
-
-        const bytes = new Uint8Array(chunk.byteLength);
-        chunk.copyTo(bytes);
-        this.socket.send(bytes);
-      },
-      error: (error) => {
-        console.error("[MIMI VoiceManager] encoder:", error);
-        this.activity("❌ Opus encoder: " + (error?.message || error));
-        this.setState(VoiceState.ERROR);
-      }
-    });
-
-    this.encoder.configure({
-      codec: "opus",
-      sampleRate: 24000,
-      numberOfChannels: 1,
-      bitrate: VOICE_CONFIG.bitrate,
-      opus: { frameDuration: 60000 }
-    });
-  },
-
-  appendPcm(input) {
-    const merged = new Float32Array(
-      this.pcmBuffer.length + input.length
-    );
-
-    merged.set(this.pcmBuffer);
-    merged.set(input, this.pcmBuffer.length);
-    this.pcmBuffer = merged;
-
-    while (this.pcmBuffer.length >= 1440) {
-      const frame = this.pcmBuffer.slice(0, 1440);
-      this.pcmBuffer = this.pcmBuffer.slice(1440);
-      this.encodeFrame(frame);
-    }
-  },
-
-  encodeFrame(frame) {
-    if (!this.encoder || this.encoder.state !== "configured") return;
-
-    const data = new AudioData({
-      format: "f32",
-      sampleRate: 24000,
-      numberOfFrames: 1440,
-      numberOfChannels: 1,
-      timestamp: this.timestampUs,
-      data: new Float32Array(frame)
-    });
-
-    this.timestampUs += 60000;
-
-    try {
-      this.encoder.encode(data);
-    } finally {
-      data.close();
-    }
-  },
-
-  async startMicrophone() {
-    this.mediaStream =
-      await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        },
-        video: false
-      });
-
-    this.audioContext =
-      new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 24000,
-        latencyHint: "interactive"
-      });
-
-    await this.audioContext.resume();
-
-    this.sourceNode =
-      this.audioContext.createMediaStreamSource(
-        this.mediaStream
-      );
-
-    this.processorNode =
-      this.audioContext.createScriptProcessor(4096, 1, 1);
-
-    this.processorNode.onaudioprocess = (event) => {
-      if (!this.audioRunning) return;
-
-      this.appendPcm(
-        new Float32Array(
-          event.inputBuffer.getChannelData(0)
-        )
-      );
-    };
-
-    this.sourceNode.connect(this.processorNode);
-    this.processorNode.connect(
-      this.audioContext.destination
-    );
-
-    this.audioRunning = true;
-    this.activity("🎤 Mic → PCM → Opus → Xiaozhi");
-  },
-
-  sendListenStart() {
-    if (
-      this.socket?.readyState !== WebSocket.OPEN ||
-      !this.sessionId
-    ) return;
-
-    this.socket.send(JSON.stringify({
-      session_id: this.sessionId,
-      type: "listen",
-      state: "start",
-      mode: "auto"
-    }));
-
-    this.activity("Xiaozhi ← listen/start auto");
-  },
-
-  async start() {
-    if (this.audioRunning) return;
-
-    try {
-      await this.connect();
-      await this.startEncoder();
-      await this.initTtsDecoder();
-
-      this.pcmBuffer = new Float32Array(0);
-      this.timestampUs = 0;
-      this.decoderTimestampUs = 0;
-      this.localReplyPending = false;
-      this.localReplyText = "";
-
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
-
-      this.sendListenStart();
-      await this.startMicrophone();
-
-      this.setState(VoiceState.LISTENING);
-      setStatus("🎤 MIMI ĐANG NGHE…", "listening");
-      ui.systemMic.textContent = "Đang nghe";
-      ui.systemSpeaker.textContent = "Sẵn sàng";
-    } catch (error) {
-      await this.stop();
-      throw error;
-    }
-  },
-
-  async stop() {
-    this.audioRunning = false;
-
-    if (
-      this.socket?.readyState === WebSocket.OPEN &&
-      this.sessionId
-    ) {
-      this.socket.send(JSON.stringify({
-        session_id: this.sessionId,
-        type: "listen",
-        state: "stop",
-        mode: "auto"
-      }));
-    }
-
-    try { this.processorNode?.disconnect(); } catch {}
-    try { this.sourceNode?.disconnect(); } catch {}
-
-    this.processorNode = null;
-    this.sourceNode = null;
-
-    this.mediaStream?.getTracks().forEach(
-      track => track.stop()
-    );
-    this.mediaStream = null;
-
-    try { await this.audioContext?.close(); } catch {}
-    this.audioContext = null;
-
-    try { this.encoder?.close(); } catch {}
-    this.encoder = null;
-
-    this.pcmBuffer = new Float32Array(0);
-    this.stopTtsPlayback();
-
-    this.setState(VoiceState.IDLE);
-    setStatus("Minh đang sẵn sàng", "idle");
-    ui.systemMic.textContent = "Sẵn sàng";
-    ui.systemSpeaker.textContent = "Sẵn sàng";
-  },
-
-  async interrupt() {
-    // The supplied Xiaozhi server performs the actual abort when
-    // server-side AEC + VAD detects voice while TTS is playing.
-    // Reset browser-side TTS playback as soon as the server reports stop.
-    this.stopTtsPlayback();
-    this.setState(VoiceState.INTERRUPTED);
-    await this.start();
-  }
+const $ = (id) => document.getElementById(id);
+
+const ui = {
+  talk: $("talkButton"),
+  quickTalk: $("quickTalk"),
+  chatTalk: $("chatTalk"),
+  status: $("mimiStatus"),
+  stage: document.querySelector(".mimi-stage"),
+  wave: $("voiceWave"),
+  userBubble: $("userBubble"),
+  mimiBubble: $("mimiBubble"),
+  activity: $("activityList"),
+  coreConnection: $("coreConnection"),
+  aiCoreStatus: $("aiCoreStatus"),
+  systemCore: $("systemCore"),
+  systemMic: $("systemMic"),
+  systemSpeaker: $("systemSpeaker"),
+  batteryText: $("batteryText"),
+  batteryValue: $("batteryValue"),
+  batteryBar: $("batteryBar"),
+  batteryLevel: $("batteryLevel"),
+  chargeStatus: $("chargeStatus"),
+  clock: $("clock"),
+  statusClock: $("statusClock"),
+  sidebar: $("sidebar"),
+  overlay: $("mobileOverlay")
 };
 
-window.MIMIVoiceManager = voiceManager;
+let recognition = null;
+let isListening = false;
+let isProcessing = false;
+let micStream = null;
+let voicesReady = false;
 
 function setStatus(text, mode = "idle") {
   ui.status.textContent = text;
   ui.stage.classList.toggle("listening", mode === "listening");
   ui.stage.classList.toggle("speaking", mode === "speaking");
   ui.talk.classList.toggle("listening", mode === "listening");
-  ui.talk.querySelector(".mic-icon").textContent =
-    mode === "listening" ? "⏹" : "🎙";
+
+  const icon = ui.talk.querySelector(".mic-icon");
+  if (icon) icon.textContent = mode === "listening" ? "⏹" : "🎙";
 }
 
-function addActivity(text, type = "normal") {
+function updateClock() {
+  const now = new Date();
+  const value = now.toLocaleTimeString("vi-VN");
+  ui.clock.textContent = value;
+  ui.statusClock.textContent = value;
+}
+updateClock();
+setInterval(updateClock, 1000);
+
+function addActivity(text) {
   const item = document.createElement("div");
   item.className = "activity-item";
+
   const time = new Date().toLocaleTimeString("vi-VN", {
     hour: "2-digit",
     minute: "2-digit"
   });
+
   item.textContent = `${time}  ${text}`;
   ui.activity.prepend(item);
 
@@ -703,167 +88,374 @@ function showConversation(userText, mimiText = "") {
 }
 
 function setCoreState(online) {
-  ui.coreConnection.textContent =
-    online ? "Đã kết nối" : "Mất kết nối";
+  ui.coreConnection.textContent = online ? "Đã kết nối" : "Mất kết nối";
   ui.coreConnection.style.color =
     online ? "var(--green)" : "var(--danger)";
-  ui.aiCoreStatus.textContent =
-    online ? "Online ●" : "Offline ●";
+
+  ui.aiCoreStatus.textContent = online ? "Online ●" : "Offline ●";
   ui.aiCoreStatus.style.color =
     online ? "var(--green)" : "var(--danger)";
-  ui.systemCore.textContent =
-    online ? "Online" : "Offline";
+
+  ui.systemCore.textContent = online ? "Online" : "Offline";
   ui.systemCore.style.color =
     online ? "var(--green)" : "var(--danger)";
 }
 
-function updateClock() {
-  const now = new Date();
-  const value = now.toLocaleTimeString("vi-VN");
-  ui.clock.textContent = value;
-  ui.statusClock.textContent = value;
-}
-updateClock();
-setInterval(updateClock, 1000);
-
+/*
+  LOCAL CORE ONLY
+  MIMI PRO Web -> http://127.0.0.1:3000/api/chat
+*/
 async function checkCore() {
-  // Local-first: check the same MIMI AI Core used by the tested
-  // nhap30.html pipeline. No Gemini/Cloud Worker is used here.
   try {
-    const response = await fetch(
-      `${VOICE_CONFIG.localCoreUrl}/`,
-      { cache: "no-store" }
+    const response = await fetch(`${CONFIG.localCoreUrl}/`, {
+      method: "GET",
+      cache: "no-store"
+    });
+
+    setCoreState(response.ok);
+    addActivity(
+      response.ok
+        ? "🧠 MIMI Local AI Core: ONLINE"
+        : `❌ Local AI Core HTTP ${response.status}`
     );
-
-    if (!response.ok) {
-      setCoreState(false);
-      return;
-    }
-
-    const data = await response.json().catch(() => ({}));
-    setCoreState(data?.provider === "local" || response.ok);
   } catch (error) {
-    console.warn("[MIMI Local Core] offline:", error);
     setCoreState(false);
+    addActivity("❌ Không kết nối Local AI Core: " + error.message);
   }
 }
 
-function startBrowserVietnameseSTT() {
-  const SpeechRecognition =
-    window.SpeechRecognition || window.webkitSpeechRecognition;
+async function askMimi(text) {
+  const response = await fetch(`${CONFIG.localCoreUrl}/api/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      message: text,
+      provider: "local"
+    }),
+    cache: "no-store"
+  });
 
-  if (!SpeechRecognition) {
-    throw new Error("Trình duyệt không hỗ trợ Speech Recognition.");
+  const raw = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${raw}`);
   }
 
-  if (voiceManager.browserListening) {
-    try { voiceManager.browserRecognition?.stop(); } catch {}
+  let data = {};
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error("Local AI trả về dữ liệu không phải JSON: " + raw);
+  }
+
+  return (
+    data.reply ||
+    data.response ||
+    data.message ||
+    data.content ||
+    data.text ||
+    "MIMI chưa nhận được câu trả lời."
+  );
+}
+
+function chooseVietnameseVoice() {
+  if (!("speechSynthesis" in window)) return null;
+
+  const voices = window.speechSynthesis.getVoices();
+
+  return (
+    voices.find(v => /^vi(-|_)/i.test(v.lang)) ||
+    voices.find(v =>
+      /Vietnam|Vietnamese|Tiếng Việt/i.test(v.name)
+    ) ||
+    null
+  );
+}
+
+/*
+  TTS LOCAL BROWSER
+  No Xiaozhi TTS / no Cloud TTS.
+*/
+function speak(text) {
+  if (!("speechSynthesis" in window)) {
+    ui.systemSpeaker.textContent = "Không hỗ trợ TTS";
+    addActivity("❌ Trình duyệt không hỗ trợ SpeechSynthesis");
     return;
   }
 
-  const recognition = new SpeechRecognition();
+  window.speechSynthesis.cancel();
 
-  // Explicit Vietnamese speech capture.
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = CONFIG.language;
+  utterance.rate = 0.95;
+  utterance.pitch = 1;
+  utterance.volume = 1;
+
+  const voice = chooseVietnameseVoice();
+
+  if (voice) {
+    utterance.voice = voice;
+    addActivity(`🔊 TTS: ${voice.name} (${voice.lang})`);
+  } else {
+    addActivity("🔊 TTS: vi-VN / voice mặc định");
+  }
+
+  utterance.onstart = () => {
+    setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
+    ui.systemSpeaker.textContent = "Đang nói";
+  };
+
+  utterance.onend = () => {
+    setStatus("Minh đang sẵn sàng", "idle");
+    ui.systemSpeaker.textContent = "Sẵn sàng";
+  };
+
+  utterance.onerror = (event) => {
+    console.error("[MIMI TTS]", event);
+    ui.systemSpeaker.textContent = "Lỗi loa";
+    addActivity("❌ TTS ERROR: " + (event.error || "unknown"));
+    setStatus("⚠️ MIMI không phát được loa", "idle");
+  };
+
+  window.speechSynthesis.speak(utterance);
+}
+
+if ("speechSynthesis" in window) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    voicesReady = true;
+  };
+}
+
+/*
+  MICROPHONE
+  We explicitly request the microphone first.
+  This makes the permission/error visible instead of silently doing nothing.
+*/
+async function requestMicrophone() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("Trình duyệt không hỗ trợ microphone.");
+  }
+
+  if (micStream) return;
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1
+    },
+    video: false
+  });
+
+  addActivity("🎤 Microphone đã được cấp quyền");
+}
+
+/*
+  VIETNAMESE STT
+  SpeechRecognition -> visible text -> Local AI -> Browser TTS.
+*/
+const SpeechRecognition =
+  window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (SpeechRecognition) {
+  recognition = new SpeechRecognition();
+
   recognition.lang = "vi-VN";
   recognition.continuous = false;
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
-  voiceManager.browserRecognition = recognition;
-  voiceManager.browserListening = true;
-
-  let finalText = "";
-
   recognition.onstart = () => {
-    voiceManager.setState(VoiceState.LISTENING);
-    setVoicePipeline("listening");
-    setStatus("🎤 MIMI ĐANG THU TIẾNG…", "listening");
+    isListening = true;
+
+    setStatus("🎤 MIMI ĐANG THU TIẾNG VIỆT…", "listening");
     ui.systemMic.textContent = "Đang thu tiếng";
     ui.systemSpeaker.textContent = "Sẵn sàng";
-    addActivity("🎤 Đang thu tiếng Việt (vi-VN)");
 
-    // Clear the old user bubble so the current transcript is obvious.
     ui.userBubble.textContent = "Đang nghe…";
     ui.userBubble.classList.remove("hidden");
+
+    addActivity("🎤 STT bắt đầu — vi-VN");
   };
 
-  recognition.onresult = (event) => {
-    let transcript = "";
+  recognition.onspeechstart = () => {
+    setStatus("👂 MIMI ĐANG NGHE GIỌNG…", "listening");
+  };
+
+  recognition.onresult = async (event) => {
+    let finalText = "";
+    let interimText = "";
 
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      const part = event.results[i][0]?.transcript || "";
-      transcript += part;
+      const result = event.results[i];
+      const chunk = result?.[0]?.transcript || "";
 
-      // Show live/interim text on the Web.
-      ui.userBubble.textContent = transcript.trim() || "Đang nghe…";
+      if (result.isFinal) {
+        finalText += chunk;
+      } else {
+        interimText += chunk;
+      }
+    }
+
+    const visibleText = (finalText || interimText).trim();
+
+    if (visibleText) {
+      // ALWAYS show the text we heard.
+      ui.userBubble.textContent = visibleText;
       ui.userBubble.classList.remove("hidden");
     }
 
-    const last = event.results[event.results.length - 1];
-    if (last?.isFinal) {
-      finalText = transcript.trim();
+    if (!finalText.trim()) return;
+
+    const text = finalText.trim();
+
+    isProcessing = true;
+    ui.talk.disabled = true;
+
+    setStatus("📝 ĐÃ THU XONG — ĐANG GỬI LOCAL AI…", "idle");
+    ui.systemMic.textContent = "Đã thu + có văn bản";
+
+    showConversation(text);
+    addActivity("📝 Văn bản thu được: " + text);
+
+    try {
+      const answer = await askMimi(text);
+
+      showConversation(text, answer);
+      addActivity("MIMI Local AI: " + answer);
+
+      setCoreState(true);
+
+      // Speak the Local AI answer.
+      speak(answer);
+    } catch (error) {
+      console.error("[MIMI LOCAL CORE]", error);
+
+      setCoreState(false);
+      setStatus("❌ LOCAL AI ERROR", "idle");
+      ui.systemSpeaker.textContent = "Lỗi";
+
+      showConversation(
+        text,
+        "MIMI nghe được rồi nhưng Local AI chưa trả lời: " +
+        error.message
+      );
+
+      addActivity("❌ Local AI: " + error.message);
+    } finally {
+      isProcessing = false;
+      ui.talk.disabled = false;
+      ui.systemMic.textContent = "Sẵn sàng";
     }
   };
 
   recognition.onerror = (event) => {
-    console.error("[MIMI Web STT]", event.error);
-    voiceManager.browserListening = false;
+    isListening = false;
+    ui.talk.disabled = false;
 
-    const message =
-      event.error === "not-allowed" || event.error === "service-not-allowed"
-        ? "❌ Chưa được cấp quyền microphone"
-        : "❌ Speech: " + event.error;
+    const error = event.error || "unknown";
 
-    setStatus(message, "idle");
-    ui.systemMic.textContent = "Lỗi";
-    addActivity(message);
-  };
+    console.error("[MIMI STT]", error);
+    addActivity("❌ STT ERROR: " + error);
 
-  recognition.onend = async () => {
-    voiceManager.browserListening = false;
-    voiceManager.browserRecognition = null;
-
-    const message = finalText.trim();
-
-    if (!message) {
-      voiceManager.setState(VoiceState.IDLE);
-      setStatus("Minh đang sẵn sàng", "idle");
-      ui.systemMic.textContent = "Sẵn sàng";
-      addActivity("⚠️ Không thu được văn bản");
-      return;
+    if (error === "not-allowed" || error === "permission-denied") {
+      setStatus("❌ CHƯA CẤP QUYỀN MICROPHONE", "idle");
+    } else if (error === "service-not-allowed") {
+      setStatus("❌ TRÌNH DUYỆT CHẶN SPEECH RECOGNITION", "idle");
+    } else if (error === "no-speech") {
+      setStatus("⚠️ MIMI KHÔNG NGHE THẤY GIỌNG", "idle");
+    } else if (error === "network") {
+      setStatus("❌ SPEECH RECOGNITION LỖI MẠNG", "idle");
+    } else {
+      setStatus(`❌ STT: ${error}`, "idle");
     }
 
-    // This is the proof that speech was converted to text.
-    ui.userBubble.textContent = message;
-    ui.userBubble.classList.remove("hidden");
-    addActivity("📝 Văn bản thu được: " + message);
-    ui.systemMic.textContent = "Đã thu + chuyển văn bản";
-
-    // Existing Local AI Core path — no Cloud AI changes.
-    await voiceManager.askLocalCore(message);
+    ui.systemMic.textContent = "Lỗi";
   };
 
-  recognition.start();
+  recognition.onend = () => {
+    isListening = false;
+
+    if (!isProcessing) {
+      ui.talk.disabled = false;
+      ui.systemMic.textContent = "Sẵn sàng";
+
+      if (!ui.stage.classList.contains("speaking")) {
+        setStatus("Minh đang sẵn sàng", "idle");
+      }
+    }
+
+    addActivity("🎤 STT kết thúc");
+  };
+} else {
+  ui.systemMic.textContent = "Không hỗ trợ";
+
+  setStatus(
+    "❌ TRÌNH DUYỆT KHÔNG HỖ TRỢ SPEECH RECOGNITION",
+    "idle"
+  );
+
+  addActivity("❌ SpeechRecognition / webkitSpeechRecognition không có");
 }
 
 async function startTalk() {
+  // Unlock browser audio while still inside the user's click gesture.
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+
+    const unlock = new SpeechSynthesisUtterance("");
+    unlock.volume = 0;
+
+    try {
+      window.speechSynthesis.speak(unlock);
+    } catch {}
+  }
+
+  if (!recognition) {
+    setStatus("❌ Không có Speech Recognition", "idle");
+    return;
+  }
+
+  if (isProcessing) {
+    addActivity("⏳ MIMI đang xử lý câu trước");
+    return;
+  }
+
+  if (isListening) {
+    try {
+      recognition.stop();
+    } catch {}
+    return;
+  }
+
   try {
-    // For the current MIMI PRO Web test, use browser Vietnamese STT.
-    // Xiaozhi/Cloud/AI Core code remains intact.
-    await startBrowserVietnameseSTT();
+    // Explicit microphone permission first.
+    await requestMicrophone();
+
+    ui.userBubble.classList.add("hidden");
+    ui.mimiBubble.classList.add("hidden");
+
+    // recognition.start() MUST happen after the user click.
+    recognition.start();
+
   } catch (error) {
-    console.error("[MIMI Web Voice]", error);
-    voiceManager.browserListening = false;
-    voiceManager.setState(VoiceState.ERROR);
-    setStatus("❌ VOICE ERROR", "idle");
+    console.error("[MIMI MIC START]", error);
+
+    setStatus("❌ KHÔNG MỞ ĐƯỢC MICROPHONE", "idle");
     ui.systemMic.textContent = "Lỗi";
-    addActivity("❌ Voice: " + error.message);
+    addActivity("❌ Microphone: " + error.message);
   }
 }
 
 ui.talk.addEventListener("click", startTalk);
 ui.quickTalk.addEventListener("click", startTalk);
 ui.chatTalk?.addEventListener("click", startTalk);
+
+
+$("showChat").addEventListener("click", () => activatePage("chat"));
 
 function activatePage(page) {
   document.querySelectorAll(".nav-item").forEach(button => {
