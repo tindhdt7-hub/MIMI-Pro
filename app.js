@@ -1,7 +1,5 @@
 const CONFIG = {
-  // MIMI PRO Web -> MIMI AI Core Local on this PC.
-  // Do NOT use Cloud Worker / Gemini for this voice test.
-  localCoreUrl: "http://127.0.0.1:3000",
+  workerUrl: "http://127.0.0.1:3000/api/chat",
   language: "vi-VN"
 };
 
@@ -36,7 +34,6 @@ const ui = {
 let recognition = null;
 let isListening = false;
 let isProcessing = false;
-let micStream = null;
 let voicesReady = false;
 
 function setStatus(text, mode = "idle") {
@@ -44,9 +41,8 @@ function setStatus(text, mode = "idle") {
   ui.stage.classList.toggle("listening", mode === "listening");
   ui.stage.classList.toggle("speaking", mode === "speaking");
   ui.talk.classList.toggle("listening", mode === "listening");
-
-  const icon = ui.talk.querySelector(".mic-icon");
-  if (icon) icon.textContent = mode === "listening" ? "⏹" : "🎙";
+  ui.talk.querySelector(".mic-icon").textContent =
+    mode === "listening" ? "⏹" : "🎙";
 }
 
 function updateClock() {
@@ -58,28 +54,23 @@ function updateClock() {
 updateClock();
 setInterval(updateClock, 1000);
 
-function addActivity(text) {
+function addActivity(text, type = "normal") {
   const item = document.createElement("div");
   item.className = "activity-item";
-
   const time = new Date().toLocaleTimeString("vi-VN", {
     hour: "2-digit",
     minute: "2-digit"
   });
-
   item.textContent = `${time}  ${text}`;
   ui.activity.prepend(item);
-
   while (ui.activity.children.length > 5) {
     ui.activity.lastElementChild.remove();
   }
 }
 
 function showConversation(userText, mimiText = "") {
-  if (userText) {
-    ui.userBubble.textContent = userText;
-    ui.userBubble.classList.remove("hidden");
-  }
+  ui.userBubble.textContent = userText;
+  ui.userBubble.classList.remove("hidden");
 
   if (mimiText) {
     ui.mimiBubble.textContent = mimiText;
@@ -89,103 +80,81 @@ function showConversation(userText, mimiText = "") {
 
 function setCoreState(online) {
   ui.coreConnection.textContent = online ? "Đã kết nối" : "Mất kết nối";
-  ui.coreConnection.style.color =
-    online ? "var(--green)" : "var(--danger)";
-
+  ui.coreConnection.style.color = online ? "var(--green)" : "var(--danger)";
   ui.aiCoreStatus.textContent = online ? "Online ●" : "Offline ●";
-  ui.aiCoreStatus.style.color =
-    online ? "var(--green)" : "var(--danger)";
-
+  ui.aiCoreStatus.style.color = online ? "var(--green)" : "var(--danger)";
   ui.systemCore.textContent = online ? "Online" : "Offline";
-  ui.systemCore.style.color =
-    online ? "var(--green)" : "var(--danger)";
+  ui.systemCore.style.color = online ? "var(--green)" : "var(--danger)";
 }
 
-/*
-  LOCAL CORE ONLY
-  MIMI PRO Web -> http://127.0.0.1:3000/api/chat
-*/
 async function checkCore() {
   try {
-    const response = await fetch(`${CONFIG.localCoreUrl}/`, {
-      method: "GET",
+    const response = await fetch(CONFIG.workerUrl, {
+      method: "OPTIONS",
       cache: "no-store"
     });
-
-    setCoreState(response.ok);
-    addActivity(
-      response.ok
-        ? "🧠 MIMI Local AI Core: ONLINE"
-        : `❌ Local AI Core HTTP ${response.status}`
-    );
-  } catch (error) {
-    setCoreState(false);
-    addActivity("❌ Không kết nối Local AI Core: " + error.message);
+    setCoreState(response.ok || response.status === 204);
+  } catch {
+    // CORS/OPTIONS may be unavailable even while POST works.
+    // Keep the UI optimistic until an actual chat request fails.
+    setCoreState(true);
   }
 }
 
 async function askMimi(text) {
-  const response = await fetch(`${CONFIG.localCoreUrl}/api/chat`, {
+  const response = await fetch(CONFIG.workerUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      message: text,
-      provider: "local"
-    }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: text }),
     cache: "no-store"
   });
 
-  const raw = await response.text();
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+
+  const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${raw}`);
+    throw new Error(
+      data?.error ||
+      data?.details?.error?.message ||
+      `HTTP ${response.status}`
+    );
   }
 
-  let data = {};
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw new Error("Local AI trả về dữ liệu không phải JSON: " + raw);
+  const reply =
+    data?.reply ||
+    data?.response ||
+    data?.message?.content ||
+    data?.message ||
+    data?.content ||
+    data?.text ||
+    "";
+
+  if (!reply) {
+    throw new Error("MIMI AI Core không trả về reply.");
   }
 
-  return (
-    data.reply ||
-    data.response ||
-    data.message ||
-    data.content ||
-    data.text ||
-    "MIMI chưa nhận được câu trả lời."
-  );
+  return String(reply);
 }
 
 function chooseVietnameseVoice() {
   if (!("speechSynthesis" in window)) return null;
-
-  const voices = window.speechSynthesis.getVoices();
-
-  return (
-    voices.find(v => /^vi(-|_)/i.test(v.lang)) ||
-    voices.find(v =>
-      /Vietnam|Vietnamese|Tiếng Việt/i.test(v.name)
-    ) ||
-    null
-  );
+  const voices = speechSynthesis.getVoices();
+  return voices.find(v => /^vi(-|_)/i.test(String(v.lang || ""))) ||
+         voices.find(v => /Vietnam|Tiếng Việt|Vietnamese/i.test(String(v.name || ""))) ||
+         null;
 }
 
-/*
-  TTS LOCAL BROWSER
-  No Xiaozhi TTS / no Cloud TTS.
-*/
 function speak(text) {
   if (!("speechSynthesis" in window)) {
-    ui.systemSpeaker.textContent = "Không hỗ trợ TTS";
-    addActivity("❌ Trình duyệt không hỗ trợ SpeechSynthesis");
+    ui.systemSpeaker.textContent = "Không hỗ trợ";
     return;
   }
 
-  window.speechSynthesis.cancel();
+  speechSynthesis.cancel();
 
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = CONFIG.language;
@@ -194,12 +163,9 @@ function speak(text) {
   utterance.volume = 1;
 
   const voice = chooseVietnameseVoice();
-
   if (voice) {
     utterance.voice = voice;
-    addActivity(`🔊 TTS: ${voice.name} (${voice.lang})`);
-  } else {
-    addActivity("🔊 TTS: vi-VN / voice mặc định");
+    utterance.lang = voice.lang || CONFIG.language;
   }
 
   utterance.onstart = () => {
@@ -212,73 +178,34 @@ function speak(text) {
     ui.systemSpeaker.textContent = "Sẵn sàng";
   };
 
-  utterance.onerror = (event) => {
-    console.error("[MIMI TTS]", event);
-    ui.systemSpeaker.textContent = "Lỗi loa";
-    addActivity("❌ TTS ERROR: " + (event.error || "unknown"));
+  utterance.onerror = () => {
     setStatus("⚠️ MIMI không phát được loa", "idle");
+    ui.systemSpeaker.textContent = "Lỗi";
   };
 
-  window.speechSynthesis.speak(utterance);
+  speechSynthesis.speak(utterance);
 }
 
 if ("speechSynthesis" in window) {
-  window.speechSynthesis.onvoiceschanged = () => {
+  speechSynthesis.onvoiceschanged = () => {
     voicesReady = true;
   };
 }
 
-/*
-  MICROPHONE
-  We explicitly request the microphone first.
-  This makes the permission/error visible instead of silently doing nothing.
-*/
-async function requestMicrophone() {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error("Trình duyệt không hỗ trợ microphone.");
-  }
-
-  if (micStream) return;
-
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-      channelCount: 1
-    },
-    video: false
-  });
-
-  addActivity("🎤 Microphone đã được cấp quyền");
-}
-
-/*
-  VIETNAMESE STT
-  SpeechRecognition -> visible text -> Local AI -> Browser TTS.
-*/
 const SpeechRecognition =
   window.SpeechRecognition || window.webkitSpeechRecognition;
 
 if (SpeechRecognition) {
   recognition = new SpeechRecognition();
-
-  recognition.lang = "vi-VN";
+  recognition.lang = CONFIG.language;
   recognition.continuous = false;
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
   recognition.onstart = () => {
     isListening = true;
-
-    setStatus("🎤 MIMI ĐANG THU TIẾNG VIỆT…", "listening");
-    ui.systemMic.textContent = "Đang thu tiếng";
-    ui.systemSpeaker.textContent = "Sẵn sàng";
-
-    ui.userBubble.textContent = "Đang nghe…";
-    ui.userBubble.classList.remove("hidden");
-
-    addActivity("🎤 STT bắt đầu — vi-VN");
+    setStatus("🎤 MIMI ĐANG NGHE…", "listening");
+    ui.systemMic.textContent = "Đang nghe";
   };
 
   recognition.onspeechstart = () => {
@@ -290,61 +217,39 @@ if (SpeechRecognition) {
     let interimText = "";
 
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      const result = event.results[i];
-      const chunk = result?.[0]?.transcript || "";
-
-      if (result.isFinal) {
-        finalText += chunk;
-      } else {
-        interimText += chunk;
-      }
+      const chunk = event.results[i][0].transcript;
+      if (event.results[i].isFinal) finalText += chunk;
+      else interimText += chunk;
     }
 
-    const visibleText = (finalText || interimText).trim();
+    const text = (finalText || interimText).trim();
+    if (!text) return;
 
-    if (visibleText) {
-      // ALWAYS show the text we heard.
-      ui.userBubble.textContent = visibleText;
+    if (!finalText) {
+      ui.userBubble.textContent = text;
       ui.userBubble.classList.remove("hidden");
+      return;
     }
-
-    if (!finalText.trim()) return;
-
-    const text = finalText.trim();
 
     isProcessing = true;
     ui.talk.disabled = true;
-
-    setStatus("📝 ĐÃ THU XONG — ĐANG GỬI LOCAL AI…", "idle");
-    ui.systemMic.textContent = "Đã thu + có văn bản";
-
-    showConversation(text);
-    addActivity("📝 Văn bản thu được: " + text);
+    setStatus("🤖 MIMI ĐANG SUY NGHĨ…", "idle");
+    ui.systemMic.textContent = "Đang xử lý";
+    showConversation(finalText);
+    addActivity(`Bạn: ${finalText}`);
 
     try {
-      const answer = await askMimi(text);
-
-      showConversation(text, answer);
-      addActivity("MIMI Local AI: " + answer);
-
+      const answer = await askMimi(finalText);
+      showConversation(finalText, answer);
+      addActivity(`MIMI: ${answer}`);
       setCoreState(true);
-
-      // Speak the Local AI answer.
       speak(answer);
     } catch (error) {
-      console.error("[MIMI LOCAL CORE]", error);
-
+      console.error("MIMI CORE ERROR:", error);
       setCoreState(false);
-      setStatus("❌ LOCAL AI ERROR", "idle");
-      ui.systemSpeaker.textContent = "Lỗi";
-
-      showConversation(
-        text,
-        "MIMI nghe được rồi nhưng Local AI chưa trả lời: " +
-        error.message
-      );
-
-      addActivity("❌ Local AI: " + error.message);
+      setStatus("❌ AI CORE ERROR", "idle");
+      showConversation(finalText, `Lỗi kết nối MIMI Core: ${error.message}`);
+      addActivity("MIMI: Lỗi kết nối AI Core");
     } finally {
       isProcessing = false;
       ui.talk.disabled = false;
@@ -355,105 +260,66 @@ if (SpeechRecognition) {
   recognition.onerror = (event) => {
     isListening = false;
     ui.talk.disabled = false;
+    ui.systemMic.textContent = "Sẵn sàng";
 
-    const error = event.error || "unknown";
-
-    console.error("[MIMI STT]", error);
-    addActivity("❌ STT ERROR: " + error);
-
+    const error = event.error;
     if (error === "not-allowed" || error === "permission-denied") {
-      setStatus("❌ CHƯA CẤP QUYỀN MICROPHONE", "idle");
+      setStatus("❌ Chưa được cấp quyền microphone", "idle");
     } else if (error === "service-not-allowed") {
-      setStatus("❌ TRÌNH DUYỆT CHẶN SPEECH RECOGNITION", "idle");
+      setStatus("❌ Trình duyệt chặn Speech Recognition", "idle");
     } else if (error === "no-speech") {
-      setStatus("⚠️ MIMI KHÔNG NGHE THẤY GIỌNG", "idle");
+      setStatus("⚠️ MIMI không nghe thấy giọng nói", "idle");
     } else if (error === "network") {
-      setStatus("❌ SPEECH RECOGNITION LỖI MẠNG", "idle");
+      setStatus("❌ Speech Recognition lỗi mạng", "idle");
     } else {
-      setStatus(`❌ STT: ${error}`, "idle");
+      setStatus(`❌ Speech: ${error}`, "idle");
     }
-
-    ui.systemMic.textContent = "Lỗi";
   };
 
   recognition.onend = () => {
     isListening = false;
-
     if (!isProcessing) {
       ui.talk.disabled = false;
       ui.systemMic.textContent = "Sẵn sàng";
-
       if (!ui.stage.classList.contains("speaking")) {
         setStatus("Minh đang sẵn sàng", "idle");
       }
     }
-
-    addActivity("🎤 STT kết thúc");
   };
 } else {
   ui.systemMic.textContent = "Không hỗ trợ";
-
-  setStatus(
-    "❌ TRÌNH DUYỆT KHÔNG HỖ TRỢ SPEECH RECOGNITION",
-    "idle"
-  );
-
-  addActivity("❌ SpeechRecognition / webkitSpeechRecognition không có");
+  setStatus("❌ Trình duyệt không hỗ trợ Speech Recognition", "idle");
 }
 
-async function startTalk() {
-  // Unlock browser audio while still inside the user's click gesture.
-  if ("speechSynthesis" in window) {
-    window.speechSynthesis.cancel();
+function startTalk() {
+  if (!recognition) return;
 
+  // iPhone/Safari: unlock audio during the user gesture.
+  if ("speechSynthesis" in window) {
+    speechSynthesis.cancel();
     const unlock = new SpeechSynthesisUtterance("");
     unlock.volume = 0;
-
-    try {
-      window.speechSynthesis.speak(unlock);
-    } catch {}
-  }
-
-  if (!recognition) {
-    setStatus("❌ Không có Speech Recognition", "idle");
-    return;
-  }
-
-  if (isProcessing) {
-    addActivity("⏳ MIMI đang xử lý câu trước");
-    return;
+    speechSynthesis.speak(unlock);
   }
 
   if (isListening) {
-    try {
-      recognition.stop();
-    } catch {}
+    recognition.stop();
     return;
   }
 
+  ui.userBubble.classList.add("hidden");
+  ui.mimiBubble.classList.add("hidden");
+
   try {
-    // Explicit microphone permission first.
-    await requestMicrophone();
-
-    ui.userBubble.classList.add("hidden");
-    ui.mimiBubble.classList.add("hidden");
-
-    // recognition.start() MUST happen after the user click.
     recognition.start();
-
   } catch (error) {
-    console.error("[MIMI MIC START]", error);
-
-    setStatus("❌ KHÔNG MỞ ĐƯỢC MICROPHONE", "idle");
-    ui.systemMic.textContent = "Lỗi";
-    addActivity("❌ Microphone: " + error.message);
+    console.warn("Recognition start:", error);
   }
 }
 
 ui.talk.addEventListener("click", startTalk);
 ui.quickTalk.addEventListener("click", startTalk);
 ui.chatTalk?.addEventListener("click", startTalk);
-
 
 $("showChat").addEventListener("click", () => activatePage("chat"));
 
