@@ -1,5 +1,5 @@
 const CONFIG = {
-  workerUrl: "http://127.0.0.1:3000/api/chat",
+  workerUrl: "https://mimi-pro-core.tindhdt7.workers.dev/chat",
   language: "vi-VN"
 };
 
@@ -115,57 +115,50 @@ async function askMimi(text) {
   }
 
   const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error ||
-      data?.details?.error?.message ||
-      `HTTP ${response.status}`
-    );
-  }
-
-  const reply =
-    data?.reply ||
-    data?.response ||
-    data?.message?.content ||
-    data?.message ||
-    data?.content ||
-    data?.text ||
-    "";
-
-  if (!reply) {
-    throw new Error("MIMI AI Core không trả về reply.");
-  }
-
-  return String(reply);
+  return data.reply || data.response || data.message || data.text ||
+    "MIMI chưa có câu trả lời.";
 }
 
 function chooseVietnameseVoice() {
   if (!("speechSynthesis" in window)) return null;
+
   const voices = speechSynthesis.getVoices();
-  return voices.find(v => /^vi(-|_)/i.test(String(v.lang || ""))) ||
-         voices.find(v => /Vietnam|Tiếng Việt|Vietnamese/i.test(String(v.name || ""))) ||
-         null;
+
+  // Ưu tiên tuyệt đối voice tiếng Việt.
+  return (
+    voices.find(v => /^vi(-|_)/i.test(String(v.lang || ""))) ||
+    voices.find(v =>
+      /Vietnamese|Tiếng Việt|Vietnam/i.test(String(v.name || ""))
+    ) ||
+    null
+  );
 }
 
 function speak(text) {
   if (!("speechSynthesis" in window)) {
-    ui.systemSpeaker.textContent = "Không hỗ trợ";
+    ui.systemSpeaker.textContent = "Không hỗ trợ TTS";
     return;
   }
 
   speechSynthesis.cancel();
 
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = CONFIG.language;
+  const utterance = new SpeechSynthesisUtterance(String(text));
+  utterance.lang = "vi-VN";
   utterance.rate = 0.95;
   utterance.pitch = 1;
   utterance.volume = 1;
 
   const voice = chooseVietnameseVoice();
+
+  // Nếu máy có voice Việt thì bắt buộc dùng voice Việt.
   if (voice) {
     utterance.voice = voice;
-    utterance.lang = voice.lang || CONFIG.language;
+    utterance.lang = voice.lang || "vi-VN";
+  } else {
+    // Không được rơi sang voice tiếng Anh.
+    ui.systemSpeaker.textContent = "Thiếu giọng tiếng Việt";
+    addActivity("⚠️ Máy chưa có Vietnamese TTS (vi-VN)");
+    return;
   }
 
   utterance.onstart = () => {
@@ -174,13 +167,14 @@ function speak(text) {
   };
 
   utterance.onend = () => {
-    setStatus("Minh đang sẵn sàng", "idle");
     ui.systemSpeaker.textContent = "Sẵn sàng";
+    setStatus("Mình đang sẵn sàng", "idle");
   };
 
-  utterance.onerror = () => {
-    setStatus("⚠️ MIMI không phát được loa", "idle");
-    ui.systemSpeaker.textContent = "Lỗi";
+  utterance.onerror = (event) => {
+    console.error("TTS ERROR:", event);
+    ui.systemSpeaker.textContent = "TTS lỗi";
+    setStatus("❌ Không phát được giọng tiếng Việt", "idle");
   };
 
   speechSynthesis.speak(utterance);
@@ -190,6 +184,18 @@ if ("speechSynthesis" in window) {
   speechSynthesis.onvoiceschanged = () => {
     voicesReady = true;
   };
+}
+
+// Chrome/Windows tải danh sách TTS bất đồng bộ.
+if ("speechSynthesis" in window) {
+  speechSynthesis.addEventListener("voiceschanged", () => {
+    console.log(
+      "MIMI Vietnamese voices:",
+      speechSynthesis.getVoices()
+        .filter(v => /^vi(-|_)/i.test(String(v.lang || "")))
+        .map(v => `${v.name} (${v.lang})`)
+    );
+  });
 }
 
 const SpeechRecognition =
