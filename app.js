@@ -55,37 +55,13 @@ function clearRecognitionWatchdog() {
   }
 }
 
-// Nút DỪNG NGHE: đặc biệt cho iPhone/Safari khi Speech Recognition bị giữ mic.
-// Tạo bằng JS để không phải xoá/sửa bố cục HTML hiện tại.
-const stopListeningButton = document.createElement("button");
-stopListeningButton.type = "button";
-stopListeningButton.id = "stopListeningButton";
-stopListeningButton.textContent = "⏹ Dừng nghe";
-stopListeningButton.setAttribute("aria-label", "Dừng nghe");
-Object.assign(stopListeningButton.style, {
-  display: "none",
-  margin: "10px auto 0",
-  padding: "11px 20px",
-  borderRadius: "999px",
-  border: "1px solid rgba(190,150,255,.75)",
-  background: "rgba(80,45,150,.9)",
-  color: "#fff",
-  fontSize: "15px",
-  fontWeight: "700",
-  cursor: "pointer",
-  boxShadow: "0 0 18px rgba(150,90,255,.35)",
-  position: "relative",
-  zIndex: "20"
-});
-
-if (ui.talk && ui.talk.parentElement) {
-  ui.talk.insertAdjacentElement("afterend", stopListeningButton);
-}
+// Nút DỪNG NGHE thật trong index.html.
+// Trên iPhone, người dùng nói xong có thể bấm nút này để kết thúc phiên mic.
+ui.stopListening = $("stopListeningButton");
 
 function showStopListeningButton(show) {
-  // Chỉ hiện khi MIMI thật sự đang nghe.
-  stopListeningButton.style.display =
-    show && isListening ? "block" : "none";
+  if (!ui.stopListening) return;
+  ui.stopListening.classList.toggle("visible", Boolean(show && isListening));
 }
 
 function stopListeningManually() {
@@ -106,7 +82,7 @@ function stopListeningManually() {
   }
 }
 
-stopListeningButton.addEventListener("click", stopListeningManually);
+ui.stopListening?.addEventListener("click", stopListeningManually);
 
 function setStatus(text, mode = "idle") {
   ui.status.textContent = text;
