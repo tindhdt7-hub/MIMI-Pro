@@ -54,7 +54,7 @@ const voiceManager = {
   localReplyPending: false,
   localReplyText: "",
 
-  // Browser voice path for MIMI PRO Web Local AI.
+  // Browser Vietnamese STT fallback/test path.
   browserRecognition: null,
   browserListening: false,
 
@@ -277,6 +277,19 @@ const voiceManager = {
         const utterance = new SpeechSynthesisUtterance(reply);
         utterance.lang = "vi-VN";
         utterance.rate = 1.0;
+
+        // Prefer an actual Vietnamese voice when the device/browser exposes one.
+        const voices = window.speechSynthesis.getVoices();
+        const viVoice =
+          voices.find(v => /^vi(-|_)/i.test(v.lang)) ||
+          voices.find(v => /Vietnam|Vietnamese|Tiếng Việt/i.test(v.name));
+
+        if (viVoice) {
+          utterance.voice = viVoice;
+          addActivity("🔊 TTS: " + viVoice.name + " (" + viVoice.lang + ")");
+        } else {
+          addActivity("🔊 TTS: vi-VN (voice mặc định của thiết bị)");
+        }
         utterance.pitch = 1.0;
         utterance.volume = 1.0;
 
@@ -735,81 +748,99 @@ async function checkCore() {
   }
 }
 
-function startBrowserVietnameseVoice() {
+function startBrowserVietnameseSTT() {
   const SpeechRecognition =
     window.SpeechRecognition || window.webkitSpeechRecognition;
 
   if (!SpeechRecognition) {
-    throw new Error("Trình duyệt không hỗ trợ nhận giọng nói.");
+    throw new Error("Trình duyệt không hỗ trợ Speech Recognition.");
   }
 
   if (voiceManager.browserListening) {
     try { voiceManager.browserRecognition?.stop(); } catch {}
-    voiceManager.browserListening = false;
-    voiceManager.setState(VoiceState.IDLE);
-    setStatus("Minh đang sẵn sàng", "idle");
-    ui.systemMic.textContent = "Sẵn sàng";
     return;
   }
 
   const recognition = new SpeechRecognition();
+
+  // Explicit Vietnamese speech capture.
   recognition.lang = "vi-VN";
   recognition.continuous = false;
-  recognition.interimResults = false;
+  recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
   voiceManager.browserRecognition = recognition;
   voiceManager.browserListening = true;
 
+  let finalText = "";
+
   recognition.onstart = () => {
     voiceManager.setState(VoiceState.LISTENING);
     setVoicePipeline("listening");
-    setStatus("🎤 MIMI ĐANG NGHE…", "listening");
-    ui.systemMic.textContent = "Đang nghe";
+    setStatus("🎤 MIMI ĐANG THU TIẾNG…", "listening");
+    ui.systemMic.textContent = "Đang thu tiếng";
     ui.systemSpeaker.textContent = "Sẵn sàng";
-    addActivity("🎤 MIMI Web → Speech Recognition (vi-VN)");
+    addActivity("🎤 Đang thu tiếng Việt (vi-VN)");
+
+    // Clear the old user bubble so the current transcript is obvious.
+    ui.userBubble.textContent = "Đang nghe…";
+    ui.userBubble.classList.remove("hidden");
   };
 
-  recognition.onresult = async (event) => {
-    const text =
-      event.results?.[0]?.[0]?.transcript?.trim() || "";
+  recognition.onresult = (event) => {
+    let transcript = "";
 
-    if (!text) {
-      addActivity("❌ Không nhận được câu nói");
-      return;
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const part = event.results[i][0]?.transcript || "";
+      transcript += part;
+
+      // Show live/interim text on the Web.
+      ui.userBubble.textContent = transcript.trim() || "Đang nghe…";
+      ui.userBubble.classList.remove("hidden");
     }
 
-    showConversation(text);
-    addActivity("Bạn: " + text);
-    ui.systemMic.textContent = "Đã nghe";
-
-    await voiceManager.askLocalCore(text);
+    const last = event.results[event.results.length - 1];
+    if (last?.isFinal) {
+      finalText = transcript.trim();
+    }
   };
 
   recognition.onerror = (event) => {
-    console.error("[MIMI Web Speech]", event.error);
+    console.error("[MIMI Web STT]", event.error);
     voiceManager.browserListening = false;
 
-    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-      setStatus("❌ Chưa được cấp quyền microphone", "idle");
-      ui.systemMic.textContent = "Lỗi";
-    } else {
-      setStatus("❌ Speech ERROR: " + event.error, "idle");
-    }
+    const message =
+      event.error === "not-allowed" || event.error === "service-not-allowed"
+        ? "❌ Chưa được cấp quyền microphone"
+        : "❌ Speech: " + event.error;
 
-    addActivity("❌ Speech: " + event.error);
+    setStatus(message, "idle");
+    ui.systemMic.textContent = "Lỗi";
+    addActivity(message);
   };
 
-  recognition.onend = () => {
+  recognition.onend = async () => {
     voiceManager.browserListening = false;
     voiceManager.browserRecognition = null;
 
-    if (!voiceManager.localReplyPending &&
-        voiceManager.state !== VoiceState.SPEAKING) {
+    const message = finalText.trim();
+
+    if (!message) {
       voiceManager.setState(VoiceState.IDLE);
       setStatus("Minh đang sẵn sàng", "idle");
       ui.systemMic.textContent = "Sẵn sàng";
+      addActivity("⚠️ Không thu được văn bản");
+      return;
     }
+
+    // This is the proof that speech was converted to text.
+    ui.userBubble.textContent = message;
+    ui.userBubble.classList.remove("hidden");
+    addActivity("📝 Văn bản thu được: " + message);
+    ui.systemMic.textContent = "Đã thu + chuyển văn bản";
+
+    // Existing Local AI Core path — no Cloud AI changes.
+    await voiceManager.askLocalCore(message);
   };
 
   recognition.start();
@@ -817,9 +848,12 @@ function startBrowserVietnameseVoice() {
 
 async function startTalk() {
   try {
-    await startBrowserVietnameseVoice();
+    // For the current MIMI PRO Web test, use browser Vietnamese STT.
+    // Xiaozhi/Cloud/AI Core code remains intact.
+    await startBrowserVietnameseSTT();
   } catch (error) {
     console.error("[MIMI Web Voice]", error);
+    voiceManager.browserListening = false;
     voiceManager.setState(VoiceState.ERROR);
     setStatus("❌ VOICE ERROR", "idle");
     ui.systemMic.textContent = "Lỗi";
