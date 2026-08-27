@@ -64,21 +64,35 @@ function showStopListeningButton(show) {
   ui.stopListening.classList.toggle("visible", Boolean(show && isListening));
 }
 
+let latestTranscript = "";
+let manualStopRequested = false;
+let manualStopTimer = null;
+
 function stopListeningManually() {
   if (!recognition || !isListening) return;
 
   clearRecognitionWatchdog();
+  clearTimeout(manualStopTimer);
+  manualStopRequested = true;
   recognitionSession++;
   addActivity("⏹ Bạn đã dừng nghe", "normal");
 
+  // Trên iPhone, recognition.stop() đôi khi không trả final result ngay.
+  // Giữ lại câu interim để MIMI vẫn có thể xử lý thay vì chỉ tắt mic.
+  const pendingText = latestTranscript.trim();
   try {
     recognition.stop();
   } catch (error) {
     console.warn("Recognition stop:", error);
-    isListening = false;
-    setStatus("MIMI đã sẵn sàng", "idle");
-    ui.systemMic.textContent = "Sẵn sàng";
-    showStopListeningButton(false);
+  }
+
+  if (pendingText) {
+    manualStopTimer = setTimeout(() => {
+      if (manualStopRequested && !isProcessing) {
+        manualStopRequested = false;
+        processUserText(pendingText);
+      }
+    }, 250);
   }
 }
 
@@ -442,6 +456,8 @@ if (SpeechRecognition) {
   recognition.maxAlternatives = 1;
 
   recognition.onstart = () => {
+    manualStopRequested = false;
+    latestTranscript = "";
     isListening = true;
     setStatus("🎤 MIMI ĐANG NGHE…", "listening");
     ui.systemMic.textContent = "Đang nghe";
@@ -482,6 +498,47 @@ if (SpeechRecognition) {
     }
   };
 
+  async function processUserText(finalText) {
+    const cleanText = (finalText || "").trim();
+    if (!cleanText || isProcessing) return;
+
+    isProcessing = true;
+    manualStopRequested = false;
+    clearTimeout(manualStopTimer);
+    ui.talk.disabled = true;
+    setStatus("🤖 MIMI ĐANG SUY NGHĨ…", "idle");
+    ui.systemMic.textContent = "Đang xử lý";
+    showStopListeningButton(false);
+    showConversation(cleanText);
+    addActivity(`Bạn: ${cleanText}`);
+
+    try {
+      const answer = await askMimi(cleanText);
+      showConversation(cleanText, answer);
+      addActivity(`MIMI: ${answer}`);
+      setCoreState(true);
+      const usedXiaozhiTts = await speakWithXiaozhi(answer);
+      if (!usedXiaozhiTts) {
+        addActivity("⚠️ TTS Bridge không dùng được → chuyển sang Browser TTS");
+        speak(answer);
+      }
+    } catch (error) {
+      console.error("MIMI CORE ERROR:", error);
+      setCoreState(false);
+      setStatus("❌ AI CORE ERROR", "idle");
+      showConversation(cleanText, `Lỗi kết nối MIMI Core: ${error.message}`);
+      addActivity("MIMI: Lỗi kết nối AI Core");
+    } finally {
+      isProcessing = false;
+      ui.talk.disabled = false;
+      ui.systemMic.textContent = "Sẵn sàng";
+      latestTranscript = "";
+      if (!ui.stage.classList.contains("speaking")) {
+        setStatus("Minh đang sẵn sàng", "idle");
+      }
+    }
+  }
+
   recognition.onresult = async (event) => {
     let finalText = "";
     let interimText = "";
@@ -495,42 +552,15 @@ if (SpeechRecognition) {
     const text = (finalText || interimText).trim();
     if (!text) return;
 
+    latestTranscript = text;
+
     if (!finalText) {
       ui.userBubble.textContent = text;
       ui.userBubble.classList.remove("hidden");
       return;
     }
 
-    isProcessing = true;
-    ui.talk.disabled = true;
-    setStatus("🤖 MIMI ĐANG SUY NGHĨ…", "idle");
-    ui.systemMic.textContent = "Đang xử lý";
-    showConversation(finalText);
-    addActivity(`Bạn: ${finalText}`);
-
-    try {
-      const answer = await askMimi(finalText);
-      showConversation(finalText, answer);
-      addActivity(`MIMI: ${answer}`);
-      setCoreState(true);
-      // Ưu tiên TTS Bridge đã test trên laptop.
-      // Nếu bridge lỗi/mất → giữ nguyên Browser TTS hiện tại làm fallback.
-      const usedXiaozhiTts = await speakWithXiaozhi(answer);
-      if (!usedXiaozhiTts) {
-        addActivity("⚠️ TTS Bridge không dùng được → chuyển sang Browser TTS");
-        speak(answer);
-      }
-    } catch (error) {
-      console.error("MIMI CORE ERROR:", error);
-      setCoreState(false);
-      setStatus("❌ AI CORE ERROR", "idle");
-      showConversation(finalText, `Lỗi kết nối MIMI Core: ${error.message}`);
-      addActivity("MIMI: Lỗi kết nối AI Core");
-    } finally {
-      isProcessing = false;
-      ui.talk.disabled = false;
-      ui.systemMic.textContent = "Sẵn sàng";
-    }
+    await processUserText(finalText);
   };
 
   recognition.onerror = (event) => {
@@ -560,6 +590,11 @@ if (SpeechRecognition) {
     recognitionSession++;
     isListening = false;
     showStopListeningButton(false);
+
+    // Nếu đã có câu và người dùng vừa bấm DỪNG, chờ handler 250 ms xử lý.
+    if (manualStopRequested && latestTranscript.trim() && !isProcessing) return;
+
+    manualStopRequested = false;
     if (!isProcessing) {
       ui.talk.disabled = false;
       ui.systemMic.textContent = "Sẵn sàng";
