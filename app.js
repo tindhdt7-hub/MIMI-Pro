@@ -15,7 +15,9 @@ const VOICE_CONFIG = {
 
   // MIMI Local AI — keep Cloud AI out of the Web chat path for now.
   // Use the laptop LAN IP so MIMI PRO Web can reach Core from another device.
-  localCoreUrl: "http://192.168.1.186:3000",
+  // MIMI AI Core chạy local trên chính laptop này.
+  // Web sẽ gọi đúng endpoint: http://127.0.0.1:3000/api/chat
+  localCoreUrl: "http://127.0.0.1:3000",
   localProvider: "local"
 };
 
