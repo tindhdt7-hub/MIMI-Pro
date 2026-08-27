@@ -3,10 +3,10 @@ const CONFIG = {
   localCoreUrl: "http://192.168.1.186:3000",
   language: "vi-VN",
 
-  // MIMI PRO WEB → Xiaozhi/Edge TTS bridge.
-  // Leave empty until the Xiaozhi server TTS endpoint is confirmed.
-  // Browser TTS below remains the automatic fallback.
-  xiaozhiTtsUrl: ""
+  // MIMI PRO WEB → local Xiaozhi/Edge TTS bridge.
+  // The bridge tested successfully on the laptop at port 8788.
+  xiaozhiTtsUrl: "http://127.0.0.1:8788/tts",
+  xiaozhiTtsTimeout: 20000
 };
 
 const $ = (id) => document.getElementById(id);
@@ -179,6 +179,12 @@ async function speakWithXiaozhi(text) {
   const url = String(CONFIG.xiaozhiTtsUrl || "").trim();
   if (!url) return false;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    Number(CONFIG.xiaozhiTtsTimeout || 20000)
+  );
+
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -188,40 +194,105 @@ async function speakWithXiaozhi(text) {
         language: "vi-VN",
         voice: "vi-VN-HoaiMyNeural"
       }),
-      cache: "no-store"
+      cache: "no-store",
+      signal: controller.signal
     });
 
     if (!response.ok) {
-      console.warn("Xiaozhi TTS HTTP:", response.status);
+      const detail = await response.text().catch(() => "");
+      console.warn(
+        "Xiaozhi TTS HTTP:",
+        response.status,
+        detail
+      );
       return false;
     }
 
-    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-    if (!contentType.includes("audio/")) {
-      console.warn("Xiaozhi TTS không trả về audio:", contentType);
+    const contentType =
+      String(response.headers.get("content-type") || "").toLowerCase();
+
+    // Normal bridge response: audio/mpeg, audio/mp3, audio/wav, etc.
+    if (contentType.includes("audio/")) {
+      const blob = await response.blob();
+      return await playTtsAudioBlob(blob);
+    }
+
+    // Also accept a JSON response so the bridge can return an audio URL
+    // or base64 audio without requiring another change to MIMI PRO Web.
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+
+      if (data.audio_url || data.url) {
+        const audioResponse = await fetch(data.audio_url || data.url, {
+          cache: "no-store"
+        });
+        if (!audioResponse.ok) return false;
+
+        const blob = await audioResponse.blob();
+        return await playTtsAudioBlob(blob);
+      }
+
+      if (data.audio_base64 || data.audio) {
+        const base64 = String(data.audio_base64 || data.audio);
+        const mime = String(data.mime_type || "audio/mpeg");
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+
+        return await playTtsAudioBlob(new Blob([bytes], { type: mime }));
+      }
+
+      console.warn("Xiaozhi TTS JSON không chứa audio:", data);
       return false;
     }
 
-    const blob = await response.blob();
-    const audioUrl = URL.createObjectURL(blob);
-    const audio = new Audio(audioUrl);
+    console.warn("Xiaozhi TTS không trả về audio:", contentType);
+    return false;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      console.warn("Xiaozhi TTS timeout.");
+      addActivity("⚠️ TTS Bridge phản hồi quá lâu");
+    } else {
+      console.warn("Xiaozhi TTS chưa sẵn sàng:", error);
+    }
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
-    setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
-    ui.systemSpeaker.textContent = "Đang nói";
+async function playTtsAudioBlob(blob) {
+  if (!blob || !blob.size) return false;
 
+  const audioUrl = URL.createObjectURL(blob);
+  const audio = new Audio(audioUrl);
+  audio.preload = "auto";
+
+  setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
+  ui.systemSpeaker.textContent = "Đang nói";
+  addActivity("🔊 MIMI đang nói bằng Edge TTS tiếng Việt");
+
+  try {
     await new Promise((resolve, reject) => {
       audio.onended = resolve;
-      audio.onerror = reject;
-      audio.play().catch(reject);
+      audio.onerror = () => reject(new Error("Audio playback error"));
+
+      const playPromise = audio.play();
+      if (playPromise?.catch) playPromise.catch(reject);
     });
 
+    return true;
+  } catch (error) {
+    console.warn("Không phát được audio từ TTS Bridge:", error);
+    addActivity("⚠️ Không phát được audio từ TTS Bridge");
+    return false;
+  } finally {
     URL.revokeObjectURL(audioUrl);
     ui.systemSpeaker.textContent = "Sẵn sàng";
     setStatus("Mình đang sẵn sàng", "idle");
-    return true;
-  } catch (error) {
-    console.warn("Xiaozhi TTS chưa sẵn sàng:", error);
-    return false;
   }
 }
 
@@ -356,10 +427,11 @@ if (SpeechRecognition) {
       showConversation(finalText, answer);
       addActivity(`MIMI: ${answer}`);
       setCoreState(true);
-      // Ưu tiên Xiaozhi/Edge TTS nếu đã cấu hình endpoint.
-      // Nếu chưa có hoặc lỗi → giữ nguyên Browser TTS hiện tại.
+      // Ưu tiên TTS Bridge đã test trên laptop.
+      // Nếu bridge lỗi/mất → giữ nguyên Browser TTS hiện tại làm fallback.
       const usedXiaozhiTts = await speakWithXiaozhi(answer);
       if (!usedXiaozhiTts) {
+        addActivity("⚠️ TTS Bridge không dùng được → chuyển sang Browser TTS");
         speak(answer);
       }
     } catch (error) {
