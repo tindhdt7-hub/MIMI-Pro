@@ -1,7 +1,12 @@
 const CONFIG = {
   // MIMI PRO WEB: LOCAL AI ONLY — không dùng Cloud AI.
   localCoreUrl: "http://192.168.1.186:3000",
-  language: "vi-VN"
+  language: "vi-VN",
+
+  // MIMI PRO WEB → Xiaozhi/Edge TTS bridge.
+  // Leave empty until the Xiaozhi server TTS endpoint is confirmed.
+  // Browser TTS below remains the automatic fallback.
+  xiaozhiTtsUrl: ""
 };
 
 const $ = (id) => document.getElementById(id);
@@ -170,6 +175,56 @@ function waitForVietnameseVoice(timeout = 3000) {
   });
 }
 
+async function speakWithXiaozhi(text) {
+  const url = String(CONFIG.xiaozhiTtsUrl || "").trim();
+  if (!url) return false;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: String(text || ""),
+        language: "vi-VN",
+        voice: "vi-VN-HoaiMyNeural"
+      }),
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      console.warn("Xiaozhi TTS HTTP:", response.status);
+      return false;
+    }
+
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("audio/")) {
+      console.warn("Xiaozhi TTS không trả về audio:", contentType);
+      return false;
+    }
+
+    const blob = await response.blob();
+    const audioUrl = URL.createObjectURL(blob);
+    const audio = new Audio(audioUrl);
+
+    setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
+    ui.systemSpeaker.textContent = "Đang nói";
+
+    await new Promise((resolve, reject) => {
+      audio.onended = resolve;
+      audio.onerror = reject;
+      audio.play().catch(reject);
+    });
+
+    URL.revokeObjectURL(audioUrl);
+    ui.systemSpeaker.textContent = "Sẵn sàng";
+    setStatus("Mình đang sẵn sàng", "idle");
+    return true;
+  } catch (error) {
+    console.warn("Xiaozhi TTS chưa sẵn sàng:", error);
+    return false;
+  }
+}
+
 async function speak(text) {
   if (!("speechSynthesis" in window)) {
     ui.systemSpeaker.textContent = "Không hỗ trợ TTS";
@@ -301,7 +356,12 @@ if (SpeechRecognition) {
       showConversation(finalText, answer);
       addActivity(`MIMI: ${answer}`);
       setCoreState(true);
-      speak(answer);
+      // Ưu tiên Xiaozhi/Edge TTS nếu đã cấu hình endpoint.
+      // Nếu chưa có hoặc lỗi → giữ nguyên Browser TTS hiện tại.
+      const usedXiaozhiTts = await speakWithXiaozhi(answer);
+      if (!usedXiaozhiTts) {
+        speak(answer);
+      }
     } catch (error) {
       console.error("MIMI CORE ERROR:", error);
       setCoreState(false);
