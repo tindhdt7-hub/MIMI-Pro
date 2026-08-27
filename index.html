@@ -7,6 +7,41 @@
   <meta name="description" content="MIMI PRO Web">
   <title>MIMI PRO</title>
   <link rel="stylesheet" href="style.css">
+
+<style id="mimi-stop-listening-style">
+.stop-listening-button {
+  display: none;
+  margin: 14px auto 0;
+  min-width: 150px;
+  min-height: 46px;
+  padding: 10px 22px;
+  border: 1px solid rgba(190,150,255,.9);
+  border-radius: 24px;
+  background: linear-gradient(135deg, rgba(105,65,190,.98), rgba(70,40,145,.98));
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: .2px;
+  box-shadow: 0 0 22px rgba(145,90,255,.42);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.stop-listening-button.visible {
+  display: block !important;
+}
+@media (max-width: 700px) {
+  .stop-listening-button {
+    display: none;
+    width: min(78vw, 280px);
+    font-size: 16px;
+    min-height: 50px;
+  }
+  .stop-listening-button.visible {
+    display: block !important;
+  }
+}
+</style>
+
 </head>
 <body>
   <div class="app-shell">
@@ -75,6 +110,10 @@
 
               <button class="mic-button" id="talkButton" type="button" aria-label="Nói với MIMI">
                 <span class="mic-icon">🎙</span>
+              </button>
+
+              <button class="stop-listening-button" id="stopListeningButton" type="button" aria-label="Dừng nghe">
+                ⏹ DỪNG NGHE
               </button>
 
               <div class="mic-hint">Nhấn mic và nói: “Mimi ơi…”</div>
@@ -168,4 +207,3 @@
   <script src="app.js"></script>
 </body>
 </html>
-
