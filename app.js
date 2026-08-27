@@ -6,6 +6,7 @@ const CONFIG = {
   // MIMI PRO WEB → local Xiaozhi/Edge TTS bridge.
   // The bridge tested successfully on the laptop at port 8788.
   xiaozhiTtsUrl: "http://127.0.0.1:8788/tts",
+  xiaozhiTtsLanUrl: "http://192.168.1.186:8788/tts",
   xiaozhiTtsTimeout: 20000
 };
 
@@ -41,6 +42,18 @@ let recognition = null;
 let isListening = false;
 let isProcessing = false;
 let voicesReady = false;
+
+// iPhone/Safari đôi khi không tự kết thúc Speech Recognition.
+// Watchdog này đảm bảo mic không bị kẹt ở trạng thái "đang nghe".
+let recognitionWatchdog = null;
+let recognitionSession = 0;
+
+function clearRecognitionWatchdog() {
+  if (recognitionWatchdog) {
+    clearTimeout(recognitionWatchdog);
+    recognitionWatchdog = null;
+  }
+}
 
 function setStatus(text, mode = "idle") {
   ui.status.textContent = text;
@@ -176,7 +189,20 @@ function waitForVietnameseVoice(timeout = 3000) {
 }
 
 async function speakWithXiaozhi(text) {
-  const url = String(CONFIG.xiaozhiTtsUrl || "").trim();
+  // Trên laptop: dùng localhost.
+  // Trên điện thoại cùng Wi‑Fi: localhost là chính điện thoại, nên dùng LAN IP.
+  // Lưu ý: nếu trang MIMI PRO đang chạy HTTPS, trình duyệt có thể chặn HTTP
+  // LAN do mixed-content; khi đó hàm sẽ trả false và Browser TTS sẽ fallback.
+  const isLocalHost =
+    location.hostname === "localhost" ||
+    location.hostname === "127.0.0.1" ||
+    location.hostname === "::1";
+
+  const url = String(
+    isLocalHost
+      ? (CONFIG.xiaozhiTtsUrl || "")
+      : (CONFIG.xiaozhiTtsLanUrl || CONFIG.xiaozhiTtsUrl || "")
+  ).trim();
   if (!url) return false;
 
   const controller = new AbortController();
@@ -390,10 +416,40 @@ if (SpeechRecognition) {
     isListening = true;
     setStatus("🎤 MIMI ĐANG NGHE…", "listening");
     ui.systemMic.textContent = "Đang nghe";
+
+    // Không cho iPhone giữ microphone vô hạn.
+    clearRecognitionWatchdog();
+    const session = ++recognitionSession;
+    recognitionWatchdog = setTimeout(() => {
+      if (session !== recognitionSession) return;
+      if (isListening && !isProcessing) {
+        addActivity("ℹ️ Mic tự dừng sau thời gian chờ");
+        try { recognition.stop(); } catch {}
+      }
+    }, 12000);
   };
 
   recognition.onspeechstart = () => {
     setStatus("👂 MIMI ĐANG NGHE GIỌNG…", "listening");
+
+    // Khi đã bắt đầu có tiếng nói, cho thêm thời gian ngắn để nhận câu.
+    clearRecognitionWatchdog();
+    const session = recognitionSession;
+    recognitionWatchdog = setTimeout(() => {
+      if (session !== recognitionSession) return;
+      if (isListening && !isProcessing) {
+        try { recognition.stop(); } catch {}
+      }
+    }, 10000);
+  };
+
+  // Safari/iOS thường phát event này khi người dùng ngừng nói.
+  // Chủ động stop để tránh trạng thái "đang nghe" kéo dài.
+  recognition.onspeechend = () => {
+    clearRecognitionWatchdog();
+    if (isListening && !isProcessing) {
+      try { recognition.stop(); } catch {}
+    }
   };
 
   recognition.onresult = async (event) => {
@@ -448,6 +504,8 @@ if (SpeechRecognition) {
   };
 
   recognition.onerror = (event) => {
+    clearRecognitionWatchdog();
+    recognitionSession++;
     isListening = false;
     ui.talk.disabled = false;
     ui.systemMic.textContent = "Sẵn sàng";
@@ -467,6 +525,8 @@ if (SpeechRecognition) {
   };
 
   recognition.onend = () => {
+    clearRecognitionWatchdog();
+    recognitionSession++;
     isListening = false;
     if (!isProcessing) {
       ui.talk.disabled = false;
@@ -484,6 +544,9 @@ if (SpeechRecognition) {
 function startTalk() {
   if (!recognition) return;
 
+  // Không mở phiên nghe mới trong lúc MIMI đang xử lý/trả lời.
+  if (isProcessing) return;
+
   // iPhone/Safari: unlock audio during the user gesture.
   if ("speechSynthesis" in window) {
     speechSynthesis.cancel();
@@ -493,7 +556,9 @@ function startTalk() {
   }
 
   if (isListening) {
-    recognition.stop();
+    clearRecognitionWatchdog();
+    recognitionSession++;
+    try { recognition.stop(); } catch {}
     return;
   }
 
