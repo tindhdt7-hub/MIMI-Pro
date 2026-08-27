@@ -124,137 +124,78 @@ function chooseVietnameseVoice() {
 
   const voices = speechSynthesis.getVoices();
 
-  // Ưu tiên tuyệt đối giọng tiếng Việt.
+  // Ưu tiên tuyệt đối voice tiếng Việt.
   return (
     voices.find(v => /^vi(-|_)/i.test(String(v.lang || ""))) ||
-    voices.find(v => /Vietnamese|Tiếng Việt|Vietnam/i.test(String(v.name || ""))) ||
+    voices.find(v =>
+      /Vietnamese|Tiếng Việt|Vietnam/i.test(String(v.name || ""))
+    ) ||
     null
   );
 }
 
-let ttsAudio = null;
-let ttsUnlocked = false;
-
-function unlockVietnameseAudio() {
-  // Tạo audio element một lần để iPhone/Safari cho phép phát âm thanh
-  // sau khi người dùng bấm nút microphone.
-  if (!ttsAudio) {
-    ttsAudio = new Audio();
-    ttsAudio.preload = "auto";
-    ttsAudio.playsInline = true;
+function speak(text) {
+  if (!("speechSynthesis" in window)) {
+    ui.systemSpeaker.textContent = "Không hỗ trợ TTS";
+    return;
   }
 
-  try {
-    ttsAudio.muted = true;
-    const p = ttsAudio.play();
-    if (p && typeof p.catch === "function") p.catch(() => {});
-    ttsAudio.pause();
-    ttsAudio.currentTime = 0;
-    ttsUnlocked = true;
-  } catch (_) {}
-}
+  speechSynthesis.cancel();
 
-function speakVietnameseFallback(text) {
-  // Đây là TTS tiếng Việt, không phải AI Cloud.
-  // Dùng khi Windows/Chrome không có voice vi-VN cài sẵn.
-  if (!ttsAudio) {
-    ttsAudio = new Audio();
-    ttsAudio.playsInline = true;
+  const utterance = new SpeechSynthesisUtterance(String(text));
+  utterance.lang = "vi-VN";
+  utterance.rate = 0.95;
+  utterance.pitch = 1;
+  utterance.volume = 1;
+
+  const voice = chooseVietnameseVoice();
+
+  // Nếu máy có voice Việt thì bắt buộc dùng voice Việt.
+  if (voice) {
+    utterance.voice = voice;
+    utterance.lang = voice.lang || "vi-VN";
+  } else {
+    // Không được rơi sang voice tiếng Anh.
+    ui.systemSpeaker.textContent = "Thiếu giọng tiếng Việt";
+    addActivity("⚠️ Máy chưa có Vietnamese TTS (vi-VN)");
+    return;
   }
 
-  const cleanText = String(text || "").trim();
-  if (!cleanText) return;
-
-  const url =
-    "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=vi&q=" +
-    encodeURIComponent(cleanText);
-
-  ttsAudio.pause();
-  ttsAudio.currentTime = 0;
-  ttsAudio.src = url;
-  ttsAudio.muted = false;
-  ttsAudio.volume = 1;
-
-  ttsAudio.onplay = () => {
+  utterance.onstart = () => {
     setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
     ui.systemSpeaker.textContent = "Đang nói";
   };
 
-  ttsAudio.onended = () => {
+  utterance.onend = () => {
     ui.systemSpeaker.textContent = "Sẵn sàng";
     setStatus("Mình đang sẵn sàng", "idle");
   };
 
-  ttsAudio.onerror = (event) => {
-    console.error("Vietnamese fallback TTS ERROR:", event);
+  utterance.onerror = (event) => {
+    console.error("TTS ERROR:", event);
     ui.systemSpeaker.textContent = "TTS lỗi";
-    setStatus("❌ Không phát được tiếng Việt", "idle");
+    setStatus("❌ Không phát được giọng tiếng Việt", "idle");
   };
 
-  const playPromise = ttsAudio.play();
-  if (playPromise && typeof playPromise.catch === "function") {
-    playPromise.catch(error => {
-      console.error("Vietnamese TTS play blocked:", error);
-      ui.systemSpeaker.textContent = "Chưa được phép phát âm thanh";
-      addActivity("⚠️ Hãy bấm Gọi MIMI rồi thử lại để mở âm thanh.");
-      setStatus("⚠️ Hãy bấm mic để bật âm thanh", "idle");
-    });
-  }
-}
-
-function speak(text) {
-  const cleanText = String(text || "").trim();
-  if (!cleanText) return;
-
-  if ("speechSynthesis" in window) {
-    speechSynthesis.cancel();
-
-    const voice = chooseVietnameseVoice();
-
-    // Nếu thiết bị có voice vi-VN thật, dùng native TTS.
-    if (voice) {
-      const utterance = new SpeechSynthesisUtterance(cleanText);
-      utterance.voice = voice;
-      utterance.lang = "vi-VN";
-      utterance.rate = 0.95;
-      utterance.pitch = 1;
-      utterance.volume = 1;
-
-      utterance.onstart = () => {
-        setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
-        ui.systemSpeaker.textContent = "Đang nói";
-      };
-
-      utterance.onend = () => {
-        ui.systemSpeaker.textContent = "Sẵn sàng";
-        setStatus("Mình đang sẵn sàng", "idle");
-      };
-
-      utterance.onerror = (event) => {
-        console.error("Native Vietnamese TTS ERROR:", event);
-        speakVietnameseFallback(cleanText);
-      };
-
-      speechSynthesis.speak(utterance);
-      return;
-    }
-  }
-
-  // Máy không có voice vi-VN: tuyệt đối không cho rơi sang giọng Anh.
-  addActivity("TTS: không có voice vi-VN, dùng bộ phát tiếng Việt dự phòng.");
-  speakVietnameseFallback(cleanText);
+  speechSynthesis.speak(utterance);
 }
 
 if ("speechSynthesis" in window) {
   speechSynthesis.onvoiceschanged = () => {
     voicesReady = true;
+  };
+}
+
+// Chrome/Windows tải danh sách TTS bất đồng bộ.
+if ("speechSynthesis" in window) {
+  speechSynthesis.addEventListener("voiceschanged", () => {
     console.log(
       "MIMI Vietnamese voices:",
       speechSynthesis.getVoices()
         .filter(v => /^vi(-|_)/i.test(String(v.lang || "")))
         .map(v => `${v.name} (${v.lang})`)
     );
-  };
+  });
 }
 
 const SpeechRecognition =
@@ -359,11 +300,12 @@ if (SpeechRecognition) {
 function startTalk() {
   if (!recognition) return;
 
-  // Mở quyền phát âm thanh ngay trong thao tác bấm mic.
-  unlockVietnameseAudio();
-
+  // iPhone/Safari: unlock audio during the user gesture.
   if ("speechSynthesis" in window) {
     speechSynthesis.cancel();
+    const unlock = new SpeechSynthesisUtterance("");
+    unlock.volume = 0;
+    speechSynthesis.speak(unlock);
   }
 
   if (isListening) {
