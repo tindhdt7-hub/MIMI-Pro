@@ -54,6 +54,10 @@ const voiceManager = {
   localReplyPending: false,
   localReplyText: "",
 
+  // Browser voice path for MIMI PRO Web Local AI.
+  browserRecognition: null,
+  browserListening: false,
+
   setState(next) {
     this.state = next;
     console.log("[MIMI VoiceManager]", next);
@@ -731,23 +735,95 @@ async function checkCore() {
   }
 }
 
-async function startTalk() {
-  try {
-    if (voiceManager.audioRunning) {
-      await voiceManager.stop();
+function startBrowserVietnameseVoice() {
+  const SpeechRecognition =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if (!SpeechRecognition) {
+    throw new Error("Trình duyệt không hỗ trợ nhận giọng nói.");
+  }
+
+  if (voiceManager.browserListening) {
+    try { voiceManager.browserRecognition?.stop(); } catch {}
+    voiceManager.browserListening = false;
+    voiceManager.setState(VoiceState.IDLE);
+    setStatus("Minh đang sẵn sàng", "idle");
+    ui.systemMic.textContent = "Sẵn sàng";
+    return;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = "vi-VN";
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+
+  voiceManager.browserRecognition = recognition;
+  voiceManager.browserListening = true;
+
+  recognition.onstart = () => {
+    voiceManager.setState(VoiceState.LISTENING);
+    setVoicePipeline("listening");
+    setStatus("🎤 MIMI ĐANG NGHE…", "listening");
+    ui.systemMic.textContent = "Đang nghe";
+    ui.systemSpeaker.textContent = "Sẵn sàng";
+    addActivity("🎤 MIMI Web → Speech Recognition (vi-VN)");
+  };
+
+  recognition.onresult = async (event) => {
+    const text =
+      event.results?.[0]?.[0]?.transcript?.trim() || "";
+
+    if (!text) {
+      addActivity("❌ Không nhận được câu nói");
       return;
     }
 
-    ui.talk.disabled = true;
-    await voiceManager.start();
+    showConversation(text);
+    addActivity("Bạn: " + text);
+    ui.systemMic.textContent = "Đã nghe";
+
+    await voiceManager.askLocalCore(text);
+  };
+
+  recognition.onerror = (event) => {
+    console.error("[MIMI Web Speech]", event.error);
+    voiceManager.browserListening = false;
+
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      setStatus("❌ Chưa được cấp quyền microphone", "idle");
+      ui.systemMic.textContent = "Lỗi";
+    } else {
+      setStatus("❌ Speech ERROR: " + event.error, "idle");
+    }
+
+    addActivity("❌ Speech: " + event.error);
+  };
+
+  recognition.onend = () => {
+    voiceManager.browserListening = false;
+    voiceManager.browserRecognition = null;
+
+    if (!voiceManager.localReplyPending &&
+        voiceManager.state !== VoiceState.SPEAKING) {
+      voiceManager.setState(VoiceState.IDLE);
+      setStatus("Minh đang sẵn sàng", "idle");
+      ui.systemMic.textContent = "Sẵn sàng";
+    }
+  };
+
+  recognition.start();
+}
+
+async function startTalk() {
+  try {
+    await startBrowserVietnameseVoice();
   } catch (error) {
-    console.error("[MIMI Voice]", error);
+    console.error("[MIMI Web Voice]", error);
     voiceManager.setState(VoiceState.ERROR);
     setStatus("❌ VOICE ERROR", "idle");
     ui.systemMic.textContent = "Lỗi";
     addActivity("❌ Voice: " + error.message);
-  } finally {
-    ui.talk.disabled = false;
   }
 }
 
