@@ -412,7 +412,7 @@ async function speak(text) {
   speechSynthesis.cancel();
   speechSynthesis.resume();
 
-  const voice = chooseVietnameseVoice() || await waitForVietnameseVoice(500);
+  const voice = await waitForVietnameseVoice(3500);
 
   if (!voice) {
     ui.systemSpeaker.textContent = "Thiếu giọng tiếng Việt";
@@ -552,10 +552,11 @@ if (SpeechRecognition) {
       showConversation(cleanText, answer);
       addActivity(`MIMI: ${answer}`);
       setCoreState(true);
-
-      // FAST TTS: không chờ Xiaozhi/Edge TTS.
-      // Khi AI trả text về, Browser TTS tiếng Việt được gọi ngay.
-      speak(answer);
+      const usedXiaozhiTts = await speakWithXiaozhi(answer);
+      if (!usedXiaozhiTts) {
+        addActivity("⚠️ TTS Bridge không dùng được → chuyển sang Browser TTS");
+        speak(answer);
+      }
     } catch (error) {
       console.error("MIMI CORE ERROR:", error);
       setCoreState(false);
@@ -746,19 +747,6 @@ if ("getBattery" in navigator) {
 } else {
   ui.batteryText.textContent = "—";
   ui.batteryValue.textContent = "—";
-}
-
-// Preload giọng TTS tiếng Việt sớm để giảm độ trễ khi AI trả lời.
-if ("speechSynthesis" in window) {
-  speechSynthesis.getVoices();
-  setTimeout(() => {
-    const voice = chooseVietnameseVoice();
-    if (voice) {
-      voicesReady = true;
-      console.log("MIMI FAST TTS ready:", voice.name, voice.lang);
-      ui.systemSpeaker.textContent = "Sẵn sàng";
-    }
-  }, 100);
 }
 
 // Seed a clean activity list.
