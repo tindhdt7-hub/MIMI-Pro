@@ -265,10 +265,12 @@ function waitForVietnameseVoice(timeout = 3000) {
 }
 
 async function speakWithXiaozhi(text) {
-  // Trên laptop: dùng localhost.
-  // Trên điện thoại cùng Wi‑Fi: localhost là chính điện thoại, nên dùng LAN IP.
-  // Lưu ý: nếu trang MIMI PRO đang chạy HTTPS, trình duyệt có thể chặn HTTP
-  // LAN do mixed-content; khi đó hàm sẽ trả false và Browser TTS sẽ fallback.
+  // MIMI trả text xong -> chia câu thành các đoạn ngắn.
+  // Gửi từng đoạn ngay để câu đầu được nói sớm hơn, thay vì chờ
+  // Edge TTS tổng hợp toàn bộ câu trả lời dài.
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) return false;
+
   const isLocalHost =
     location.hostname === "localhost" ||
     location.hostname === "127.0.0.1" ||
@@ -279,91 +281,129 @@ async function speakWithXiaozhi(text) {
       ? (CONFIG.xiaozhiTtsUrl || "")
       : (CONFIG.xiaozhiTtsLanUrl || CONFIG.xiaozhiTtsUrl || "")
   ).trim();
+
   if (!url) return false;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    Number(CONFIG.xiaozhiTtsTimeout || 20000)
-  );
+  // Chia theo câu trước; nếu câu quá dài thì cắt tiếp.
+  const sentences = value
+    .split(/(?<=[.!?。！？])\s+/)
+    .map(s => s.trim())
+    .filter(Boolean);
 
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text: String(text || ""),
-        language: "vi-VN",
-        voice: "vi-VN-HoaiMyNeural"
-      }),
-      cache: "no-store",
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      console.warn(
-        "Xiaozhi TTS HTTP:",
-        response.status,
-        detail
-      );
-      return false;
+  const chunks = [];
+  for (const sentence of sentences.length ? sentences : [value]) {
+    if (sentence.length <= 180) {
+      chunks.push(sentence);
+      continue;
     }
 
-    const contentType =
-      String(response.headers.get("content-type") || "").toLowerCase();
-
-    // Normal bridge response: audio/mpeg, audio/mp3, audio/wav, etc.
-    if (contentType.includes("audio/")) {
-      const blob = await response.blob();
-      return await playTtsAudioBlob(blob);
+    const words = sentence.split(/\s+/);
+    let part = "";
+    for (const word of words) {
+      const next = part ? `${part} ${word}` : word;
+      if (next.length > 180 && part) {
+        chunks.push(part);
+        part = word;
+      } else {
+        part = next;
+      }
     }
+    if (part) chunks.push(part);
+  }
 
-    // Also accept a JSON response so the bridge can return an audio URL
-    // or base64 audio without requiring another change to MIMI PRO Web.
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
+  let playedAny = false;
 
-      if (data.audio_url || data.url) {
-        const audioResponse = await fetch(data.audio_url || data.url, {
-          cache: "no-store"
-        });
-        if (!audioResponse.ok) return false;
+  for (const chunk of chunks) {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Number(CONFIG.xiaozhiTtsTimeout || 20000)
+    );
 
-        const blob = await audioResponse.blob();
-        return await playTtsAudioBlob(blob);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: chunk,
+          language: "vi-VN",
+          voice: "vi-VN-HoaiMyNeural"
+        }),
+        cache: "no-store",
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        console.warn("Xiaozhi TTS HTTP:", response.status, detail);
+        return playedAny;
       }
 
-      if (data.audio_base64 || data.audio) {
-        const base64 = String(data.audio_base64 || data.audio);
-        const mime = String(data.mime_type || "audio/mpeg");
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
+      const contentType =
+        String(response.headers.get("content-type") || "").toLowerCase();
 
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
+      if (contentType.includes("audio/")) {
+        const blob = await response.blob();
+        const ok = await playTtsAudioBlob(blob);
+        if (!ok) return playedAny;
+        playedAny = true;
+        continue;
+      }
+
+      if (contentType.includes("application/json")) {
+        const data = await response.json();
+
+        if (data.audio_url || data.url) {
+          const audioResponse = await fetch(data.audio_url || data.url, {
+            cache: "no-store"
+          });
+          if (!audioResponse.ok) return playedAny;
+
+          const blob = await audioResponse.blob();
+          const ok = await playTtsAudioBlob(blob);
+          if (!ok) return playedAny;
+          playedAny = true;
+          continue;
         }
 
-        return await playTtsAudioBlob(new Blob([bytes], { type: mime }));
+        if (data.audio_base64 || data.audio) {
+          const base64 = String(data.audio_base64 || data.audio);
+          const mime = String(data.mime_type || "audio/mpeg");
+          const binary = atob(base64);
+          const bytes = new Uint8Array(binary.length);
+
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+
+          const ok = await playTtsAudioBlob(
+            new Blob([bytes], { type: mime })
+          );
+          if (!ok) return playedAny;
+          playedAny = true;
+          continue;
+        }
+
+        console.warn("Xiaozhi TTS JSON không chứa audio:", data);
+        return playedAny;
       }
 
-      console.warn("Xiaozhi TTS JSON không chứa audio:", data);
-      return false;
+      console.warn("Xiaozhi TTS không trả về audio:", contentType);
+      return playedAny;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        console.warn("Xiaozhi TTS timeout.");
+        addActivity("⚠️ TTS Bridge phản hồi quá lâu");
+      } else {
+        console.warn("Xiaozhi TTS chưa sẵn sàng:", error);
+      }
+      return playedAny;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    console.warn("Xiaozhi TTS không trả về audio:", contentType);
-    return false;
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      console.warn("Xiaozhi TTS timeout.");
-      addActivity("⚠️ TTS Bridge phản hồi quá lâu");
-    } else {
-      console.warn("Xiaozhi TTS chưa sẵn sàng:", error);
-    }
-    return false;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  return playedAny;
 }
 
 async function playTtsAudioBlob(blob) {
@@ -552,11 +592,18 @@ if (SpeechRecognition) {
       showConversation(cleanText, answer);
       addActivity(`MIMI: ${answer}`);
       setCoreState(true);
-      const usedXiaozhiTts = await speakWithXiaozhi(answer);
-      if (!usedXiaozhiTts) {
-        addActivity("⚠️ TTS Bridge không dùng được → chuyển sang Browser TTS");
+      // AI đã trả TEXT -> hiển thị ngay và bắt đầu TTS ngay.
+      // Không chờ thêm một khoảng cố định trước khi phát.
+      speakWithXiaozhi(answer).then(usedXiaozhiTts => {
+        if (!usedXiaozhiTts) {
+          addActivity("⚠️ TTS Bridge không dùng được → chuyển sang Browser TTS");
+          speak(answer);
+        }
+      }).catch(error => {
+        console.warn("TTS start error:", error);
+        addActivity("⚠️ TTS Bridge lỗi → chuyển sang Browser TTS");
         speak(answer);
-      }
+      });
     } catch (error) {
       console.error("MIMI CORE ERROR:", error);
       setCoreState(false);
