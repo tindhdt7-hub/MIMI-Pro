@@ -3,6 +3,7 @@ const CONFIG = {
   localCoreUrl: "http://192.168.1.186:3000",
   language: "vi-VN",
 
+  
   // MIMI PRO WEB → local Xiaozhi/Edge TTS bridge.
   // The bridge tested successfully on the laptop at port 8788.
   xiaozhiTtsUrl: "http://127.0.0.1:8788/tts",
