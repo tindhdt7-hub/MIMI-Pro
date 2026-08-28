@@ -593,6 +593,36 @@ if (SpeechRecognition) {
     }
   };
 
+
+// ================================
+// MIMI FAST RESPONSE V1 - ADDITIVE
+// ================================
+// Very simple conversational intents do not need an LLM.
+// This keeps the existing AI/Memory/Provider pipeline untouched.
+function getFastResponse(text) {
+  const value = String(text || "").trim().toLowerCase()
+    .replace(/\s+/g, " ");
+
+  const patterns = [
+    [/^(mimi[,.! ]*)?(cậu )?(nghe( mình)?|nghe không|có nghe)([!.?]*)$/i,
+      "Dạ, MIMI nghe đây! 😊"],
+    [/^(mimi[,.! ]*)?(cậu )?(ở đó|có đó)( không)?[!.?]*$/i,
+      "Dạ, MIMI ở đây nè! 😊"],
+    [/^(mimi[,.! ]*)?(xin chào|chào mimi|hello)[!.?]*$/i,
+      "Dạ, chào cậu! MIMI đây 😊"],
+    [/^(mimi[,.! ]*)?(cảm ơn|thank you|thanks)[!.?]*$/i,
+      "Dạ, không có gì nha! 😊"],
+    [/^(mimi[,.! ]*)?(ok|okay|được rồi|ừ|ừm)[!.?]*$/i,
+      "Dạ! 😊"],
+  ];
+
+  for (const [pattern, response] of patterns) {
+    if (pattern.test(value)) return response;
+  }
+
+  return null;
+}
+
   async function processUserText(finalText) {
     const cleanText = (finalText || "").trim();
     if (!cleanText || isProcessing) return;
@@ -663,6 +693,22 @@ if (SpeechRecognition) {
     };
 
     try {
+      // Fast path: answer trivial conversational intents locally.
+      // No Cloudflare/KV/Ollama round-trip is needed.
+      const fastAnswer = getFastResponse(cleanText);
+      if (fastAnswer) {
+        displayedAnswer = fastAnswer;
+        showConversation(cleanText, displayedAnswer);
+        setCoreState(true);
+        pushTtsChunk(displayedAnswer, true);
+        addActivity(`MIMI FAST: ${displayedAnswer}`);
+
+        while (ttsRunning || ttsQueue.length) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        return;
+      }
+
       const answer = await streamMimi(cleanText, (chunk) => {
         if (!chunk) return;
         displayedAnswer += chunk;
