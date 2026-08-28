@@ -84,7 +84,7 @@ function armRecognitionSilenceTimer() {
     setTimeout(() => {
       if (!isProcessing && text) processUserText(text);
     }, 180);
-  }, 1600);
+  }, 600);
 }
 
 // Nút DỪNG NGHE thật trong index.html.
