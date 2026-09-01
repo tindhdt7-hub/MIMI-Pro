@@ -8,7 +8,11 @@ const CONFIG = {
   // The bridge tested successfully on the laptop at port 8788.
   xiaozhiTtsUrl: "http://127.0.0.1:8788/tts",
   xiaozhiTtsLanUrl: "http://192.168.1.186:8788/tts",
-  xiaozhiTtsTimeout: 20000
+  xiaozhiTtsTimeout: 20000,
+
+  // MIMI PRO WEB → MIMI AI Core → TTS Bridge.
+  // Primary TTS path for the deployed GitHub Pages version.
+  mimiTtsUrl: "https://mimi-ai-core.tindhdt7.workers.dev/api/tts"
 };
 
 const $ = (id) => document.getElementById(id);
@@ -323,6 +327,86 @@ function waitForVietnameseVoice(timeout = 3000) {
     speechSynthesis.getVoices();
     setTimeout(check, 100);
   });
+}
+
+async function speakWithMimiWorkerTts(text) {
+  const url = String(CONFIG.mimiTtsUrl || "").trim();
+  const value = String(text || "").trim();
+
+  if (!url || !value) return false;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    Number(CONFIG.xiaozhiTtsTimeout || 20000)
+  );
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: value,
+        language: "vi-VN",
+        voice: "vi-VN-HoaiMyNeural"
+      }),
+      cache: "no-store",
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      console.warn("MIMI Worker TTS HTTP:", response.status, detail);
+      return false;
+    }
+
+    const contentType =
+      String(response.headers.get("content-type") || "").toLowerCase();
+
+    if (contentType.includes("audio/")) {
+      const blob = await response.blob();
+      return await playTtsAudioBlob(blob);
+    }
+
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+
+      if (data.audio_url || data.url) {
+        const audioResponse = await fetch(data.audio_url || data.url, {
+          cache: "no-store"
+        });
+        if (!audioResponse.ok) return false;
+
+        const blob = await audioResponse.blob();
+        return await playTtsAudioBlob(blob);
+      }
+
+      if (data.audio_base64 || data.audio) {
+        const base64 = String(data.audio_base64 || data.audio);
+        const mime = String(data.mime_type || "audio/mpeg");
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+
+        return await playTtsAudioBlob(new Blob([bytes], { type: mime }));
+      }
+    }
+
+    console.warn("MIMI Worker TTS không trả về audio:", contentType);
+    return false;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      console.warn("MIMI Worker TTS timeout.");
+    } else {
+      console.warn("MIMI Worker TTS chưa sẵn sàng:", error);
+    }
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function speakWithXiaozhi(text) {
@@ -651,7 +735,7 @@ function getFastResponse(text) {
       try {
         while (ttsQueue.length) {
           const chunk = ttsQueue.shift();
-          const ok = await speakWithXiaozhi(chunk);
+          const ok = await speakWithMimiWorkerTts(chunk) || await speakWithXiaozhi(chunk);
           if (!ok) {
             ttsFailed = true;
             // Fallback browser TTS for the remaining stream text.
