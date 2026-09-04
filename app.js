@@ -12,10 +12,10 @@ const CONFIG = {
   // TTS timing: fail fast so MIMI can move to the next TTS path.
   // Xiaozhi is the first TTS path.
   xiaozhiTtsTimeout: 15000,
-  mimiTtsTimeout: 15000,
+  mimiTtsTimeout: 10000,
 
   // Start speaking earlier while AI response is still streaming.
-  ttsEarlyChunkChars: 300,
+  ttsEarlyChunkChars: 70,
 
   // MIMI PRO WEB → MIMI AI Core → TTS Bridge.
   // Kept as the secondary/fallback TTS path.
@@ -823,10 +823,16 @@ function getFastResponse(text) {
         }
       }
 
-      // Không cắt mềm theo số ký tự.
-      // Cắt giữa một câu làm TTS tạo nhiều đoạn audio nhỏ,
-      // dễ gây khoảng im lặng hoặc mất phần cuối câu.
-      // Câu dài sẽ được giữ nguyên và gửi thành một đoạn TTS.
+      // Nếu chưa gặp dấu câu, cắt mềm sớm hơn để TTS bắt đầu
+      // ngay khi AI vẫn đang streaming.
+      while (ttsBuffer.length >= Number(CONFIG.ttsEarlyChunkChars || 70)) {
+        const limit = Number(CONFIG.ttsEarlyChunkChars || 70);
+        const cut = ttsBuffer.lastIndexOf(" ", limit);
+        const index = cut > 30 ? cut : limit;
+        const value = ttsBuffer.slice(0, index).trim();
+        ttsBuffer = ttsBuffer.slice(index).trimStart();
+        if (value) ttsQueue.push(value);
+      }
 
       if (flush && ttsBuffer.trim()) {
         ttsQueue.push(ttsBuffer.trim());
