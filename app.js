@@ -409,7 +409,7 @@ async function speakWithMimiWorkerTts(text) {
       body: JSON.stringify({
         text: value,
         language: "vi-VN",
-        voice: "vi-VN-HoaiMyNeural"
+        voice: "vi-VN-NamMinhNeural"
       }),
       cache: "no-store",
       signal: controller.signal
