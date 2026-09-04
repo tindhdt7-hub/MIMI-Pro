@@ -15,7 +15,7 @@ const CONFIG = {
   mimiTtsTimeout: 10000,
 
   // Start speaking earlier while AI response is still streaming.
-  ttsEarlyChunkChars: 70,
+  ttsEarlyChunkChars: 120,
 
   // MIMI PRO WEB → MIMI AI Core → TTS Bridge.
   // Kept as the secondary/fallback TTS path.
@@ -362,24 +362,37 @@ function waitForVietnameseVoice(timeout = 3000) {
   });
 }
 
-function prepareTtsText(text) {
-  return String(text || "")
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    .replace(/^\s*[-*+]\s+/gm, "")
-    .replace(/^\s*\d+[.)]\s+/gm, "")
-    .replace(/\r?\n+/g, " ")
-    .replace(/\s{2,}/g, " ")
-    .replace(/\.{3,}/g, ".")
-    .replace(/!{2,}/g, "!")
-    .replace(/\?{2,}/g, "?")
-    .trim();
+
+// ================================
+// MIMI TTS NORMALIZER V1 - ADDITIVE
+// ================================
+// Chỉ chuẩn hóa bản text gửi vào TTS.
+// UI / AI Core / Memory vẫn giữ nguyên câu trả lời gốc.
+function normalizeTextForTTS(text) {
+  let value = String(text || "");
+
+  const replacements = [
+    [/\bMIMI\b/gi, "Mi Mi"],
+    [/\bTTS\b/gi, "chuyển văn bản thành giọng nói"],
+    [/\bASR\b/gi, "nhận dạng giọng nói"],
+    [/\bVAD\b/gi, "phát hiện giọng nói"],
+    [/\bAI\b/gi, "trí tuệ nhân tạo"],
+    [/\bAPI\b/gi, "giao diện lập trình ứng dụng"],
+    [/\bMCP\b/gi, "giao thức kết nối công cụ"],
+    [/\bESP32-S3\b/gi, "bo mạch ESP ba hai S ba"],
+    [/\bESP32\b/gi, "bo mạch ESP ba hai"]
+  ];
+
+  for (const [pattern, replacement] of replacements) {
+    value = value.replace(pattern, replacement);
+  }
+
+  return value.replace(/\s+/g, " ").trim();
 }
 
 async function speakWithMimiWorkerTts(text) {
   const url = String(CONFIG.mimiTtsUrl || "").trim();
-  const value = String(text || "").trim();
+  const value = normalizeTextForTTS(text);
 
   if (!url || !value) return false;
 
@@ -394,9 +407,9 @@ async function speakWithMimiWorkerTts(text) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: prepareTtsText(value),
+        text: value,
         language: "vi-VN",
-        voice: "vi-VN-HoaiMyNeural"
+        voice: "vi-VN-NamMinhNeural"
       }),
       cache: "no-store",
       signal: controller.signal
@@ -486,7 +499,7 @@ async function speakWithXiaozhi(text) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: prepareTtsText(text),
+        text: String(text || ""),
         language: "vi-VN",
         voice: "vi-VN-HoaiMyNeural"
       }),
@@ -599,7 +612,7 @@ async function speak(text) {
     return;
   }
 
-  const value = String(text || "").trim();
+  const value = normalizeTextForTTS(text);
   if (!value) return;
 
   // iPhone/Safari có thể giữ speechSynthesis ở trạng thái paused.
@@ -777,9 +790,6 @@ function getFastResponse(text) {
     let ttsFailed = false;
     let ttsBuffer = "";
     let displayedAnswer = "";
-    // Speak the completed answer as one Edge TTS request.
-    // This avoids audible gaps between streamed sentence fragments.
-    let ttsStarted = false;
 
     const runTtsQueue = async () => {
       if (ttsRunning) return;
@@ -787,13 +797,12 @@ function getFastResponse(text) {
       try {
         while (ttsQueue.length) {
           const chunk = ttsQueue.shift();
-          // TTS priority: Edge/Xiaozhi bridge → MIMI Worker TTS.
-          // Browser speechSynthesis is intentionally not used here because
-          // it causes the Vietnamese-voice warning and can interrupt long speech.
+          // TTS priority: Xiaozhi → MIMI Worker TTS → Browser TTS.
           const ok = await speakWithXiaozhi(chunk) || await speakWithMimiWorkerTts(chunk);
           if (!ok) {
             ttsFailed = true;
-            addActivity("⚠️ Edge TTS không phát được câu trả lời");
+            // Fallback browser TTS for the remaining stream text.
+            speak(chunk);
           }
         }
       } finally {
@@ -804,17 +813,33 @@ function getFastResponse(text) {
     const pushTtsChunk = (chunk, flush = false) => {
       ttsBuffer += String(chunk || "");
 
-      // Keep accumulating the streamed answer. When the AI finishes,
-      // send the complete response to Edge TTS as ONE audio request.
-      // This removes the pause/gap between sentence fragments.
-      if (flush && ttsBuffer.trim() && !ttsStarted) {
-        ttsQueue.push(ttsBuffer.trim());
-        ttsBuffer = "";
-        ttsStarted = true;
+      // Ưu tiên phát theo câu, tránh TTS từng token quá vụn.
+      const parts = ttsBuffer.split(/(?<=[.!?。！？])\s+/);
+      if (parts.length > 1) {
+        ttsBuffer = parts.pop() || "";
+        for (const part of parts) {
+          const value = part.trim();
+          if (value) ttsQueue.push(value);
+        }
       }
 
-      // Start only after the full answer is available.
-      if (flush) runTtsQueue();
+      // Nếu chưa gặp dấu câu, cắt mềm sớm hơn để TTS bắt đầu
+      // ngay khi AI vẫn đang streaming.
+      while (ttsBuffer.length >= Number(CONFIG.ttsEarlyChunkChars || 70)) {
+        const limit = Number(CONFIG.ttsEarlyChunkChars || 70);
+        const cut = ttsBuffer.lastIndexOf(" ", limit);
+        const index = cut > 30 ? cut : limit;
+        const value = ttsBuffer.slice(0, index).trim();
+        ttsBuffer = ttsBuffer.slice(index).trimStart();
+        if (value) ttsQueue.push(value);
+      }
+
+      if (flush && ttsBuffer.trim()) {
+        ttsQueue.push(ttsBuffer.trim());
+        ttsBuffer = "";
+      }
+
+      runTtsQueue();
     };
 
     try {
@@ -845,7 +870,7 @@ function getFastResponse(text) {
       }
 
       if (ttsFailed) {
-        addActivity("⚠️ Edge TTS không phát được toàn bộ câu trả lời");
+        addActivity("ℹ️ TTS Bridge lỗi ở một đoạn → Browser TTS đã fallback");
       }
     } catch (error) {
       console.error("MIMI CORE ERROR:", error);
