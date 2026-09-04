@@ -362,9 +362,37 @@ function waitForVietnameseVoice(timeout = 3000) {
   });
 }
 
+
+// ================================
+// MIMI TTS NORMALIZER V1 - ADDITIVE
+// ================================
+// Chỉ chuẩn hóa bản text gửi vào TTS.
+// UI / AI Core / Memory vẫn giữ nguyên câu trả lời gốc.
+function normalizeTextForTTS(text) {
+  let value = String(text || "");
+
+  const replacements = [
+    [/\bMIMI\b/gi, "Mi Mi"],
+    [/\bTTS\b/gi, "chuyển văn bản thành giọng nói"],
+    [/\bASR\b/gi, "nhận dạng giọng nói"],
+    [/\bVAD\b/gi, "phát hiện giọng nói"],
+    [/\bAI\b/gi, "trí tuệ nhân tạo"],
+    [/\bAPI\b/gi, "giao diện lập trình ứng dụng"],
+    [/\bMCP\b/gi, "giao thức kết nối công cụ"],
+    [/\bESP32-S3\b/gi, "bo mạch ESP ba hai S ba"],
+    [/\bESP32\b/gi, "bo mạch ESP ba hai"]
+  ];
+
+  for (const [pattern, replacement] of replacements) {
+    value = value.replace(pattern, replacement);
+  }
+
+  return value.replace(/\s+/g, " ").trim();
+}
+
 async function speakWithMimiWorkerTts(text) {
   const url = String(CONFIG.mimiTtsUrl || "").trim();
-  const value = String(text || "").trim();
+  const value = normalizeTextForTTS(text);
 
   if (!url || !value) return false;
 
@@ -584,7 +612,7 @@ async function speak(text) {
     return;
   }
 
-  const value = String(text || "").trim();
+  const value = normalizeTextForTTS(text);
   if (!value) return;
 
   // iPhone/Safari có thể giữ speechSynthesis ở trạng thái paused.
