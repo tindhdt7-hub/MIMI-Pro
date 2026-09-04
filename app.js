@@ -2,9 +2,8 @@ const CONFIG = {
   // MIMI PRO WEB: LOCAL AI ONLY — không dùng Cloud AI.
   localCoreUrl: "http://192.168.1.186:3000",
   language: "vi-VN",
-  userIdKey: "mimi-pro-user-id-v1",
-  sessionIdKey: "mimi-pro-session-id-v1",
 
+  
   // MIMI PRO WEB → local Xiaozhi/Edge TTS bridge.
   // The bridge tested successfully on the laptop at port 8788.
   xiaozhiTtsUrl: "http://127.0.0.1:8788/tts",
@@ -12,11 +11,11 @@ const CONFIG = {
 
   // TTS timing: fail fast so MIMI can move to the next TTS path.
   // Xiaozhi is the first TTS path.
-  xiaozhiTtsTimeout: 10000,
-  mimiTtsTimeout: 10000,
+  xiaozhiTtsTimeout: 15000,
+  mimiTtsTimeout: 15000,
 
   // Start speaking earlier while AI response is still streaming.
-  ttsEarlyChunkChars: 120,
+  ttsEarlyChunkChars: 300,
 
   // MIMI PRO WEB → MIMI AI Core → TTS Bridge.
   // Kept as the secondary/fallback TTS path.
@@ -771,130 +770,6 @@ function getFastResponse(text) {
   return null;
 }
 
-// ================================
-// MIMI TTS PIPELINE V2 - ADDITIVE
-// ================================
-// Chuẩn bị audio trước khi đoạn trước phát xong.
-// Nhờ vậy các đoạn TTS không phải chờ nhau tạo audio,
-// giảm mạnh khoảng im lặng 4-5 giây giữa các đoạn.
-function isMixedContentTtsUrl(url) {
-  try {
-    return location.protocol === "https:" && String(url || "").startsWith("http:");
-  } catch {
-    return false;
-  }
-}
-
-async function fetchTtsAudioBlob(url, payload, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Number(timeoutMs || 4500));
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      cache: "no-store",
-      signal: controller.signal
-    });
-
-    if (!response.ok) return null;
-
-    const contentType =
-      String(response.headers.get("content-type") || "").toLowerCase();
-
-    if (contentType.includes("audio/")) {
-      const blob = await response.blob();
-      return blob?.size ? blob : null;
-    }
-
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
-
-      if (data.audio_url || data.url) {
-        const audioResponse = await fetch(data.audio_url || data.url, {
-          cache: "no-store"
-        });
-        if (!audioResponse.ok) return null;
-        const blob = await audioResponse.blob();
-        return blob?.size ? blob : null;
-      }
-
-      if (data.audio_base64 || data.audio) {
-        const base64 = String(data.audio_base64 || data.audio);
-        const mime = String(data.mime_type || "audio/mpeg");
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-
-        return new Blob([bytes], { type: mime });
-      }
-    }
-
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function prepareTtsAudio(text) {
-  const value = normalizeTextForTTS(text);
-  if (!value) return null;
-
-  // Trên GitHub Pages HTTPS, HTTP LAN sẽ bị Mixed Content.
-  // Bỏ qua ngay để không mất thời gian chờ lỗi rồi mới fallback.
-  const isLocalHost =
-    location.hostname === "localhost" ||
-    location.hostname === "127.0.0.1" ||
-    location.hostname === "::1";
-
-  const xiaozhiUrl = String(
-    isLocalHost
-      ? (CONFIG.xiaozhiTtsUrl || "")
-      : (CONFIG.xiaozhiTtsLanUrl || CONFIG.xiaozhiTtsUrl || "")
-  ).trim();
-
-  if (xiaozhiUrl && !isMixedContentTtsUrl(xiaozhiUrl)) {
-    try {
-      const blob = await fetchTtsAudioBlob(
-        xiaozhiUrl,
-        {
-          text: value,
-          language: "vi-VN",
-          voice: "vi-VN-HoaiMyNeural"
-        },
-        CONFIG.xiaozhiTtsTimeout || 3500
-      );
-      if (blob) return blob;
-    } catch (error) {
-      console.warn("Prepared Xiaozhi TTS:", error);
-    }
-  }
-
-  const workerUrl = String(CONFIG.mimiTtsUrl || "").trim();
-  if (workerUrl) {
-    try {
-      const blob = await fetchTtsAudioBlob(
-        workerUrl,
-        {
-          text: value,
-          language: "vi-VN",
-          voice: "vi-VN-NamMinhNeural"
-        },
-        CONFIG.mimiTtsTimeout || 4500
-      );
-      if (blob) return blob;
-    } catch (error) {
-      console.warn("Prepared Worker TTS:", error);
-    }
-  }
-
-  return null;
-}
-
   async function processUserText(finalText) {
     const cleanText = (finalText || "").trim();
     if (!cleanText || isProcessing) return;
@@ -921,42 +796,18 @@ async function prepareTtsAudio(text) {
       ttsRunning = true;
       try {
         while (ttsQueue.length) {
-          const item = ttsQueue.shift();
-          if (!item) continue;
-
-          let blob = null;
-          try {
-            // Audio của đoạn kế tiếp đã được chuẩn bị song song
-            // trong lúc đoạn hiện tại đang phát.
-            blob = await item.audioPromise;
-          } catch (error) {
-            console.warn("Prepared TTS queue:", error);
-          }
-
-          if (blob) {
-            await playTtsAudioBlob(blob);
-          } else {
+          const chunk = ttsQueue.shift();
+          // TTS priority: Xiaozhi → MIMI Worker TTS → Browser TTS.
+          const ok = await speakWithXiaozhi(chunk) || await speakWithMimiWorkerTts(chunk);
+          if (!ok) {
             ttsFailed = true;
-            // Fallback browser TTS cho chính đoạn bị lỗi.
-            await speak(item.text);
+            // Fallback browser TTS for the remaining stream text.
+            speak(chunk);
           }
         }
       } finally {
         ttsRunning = false;
       }
-    };
-
-    const enqueueTtsChunk = (value) => {
-      const clean = String(value || "").trim();
-      if (!clean) return;
-
-      // Bắt đầu tạo audio NGAY khi có đoạn mới, không chờ
-      // đoạn trước phát xong.
-      const audioPromise = prepareTtsAudio(clean);
-      ttsQueue.push({
-        text: clean,
-        audioPromise
-      });
     };
 
     const pushTtsChunk = (chunk, flush = false) => {
@@ -968,23 +819,17 @@ async function prepareTtsAudio(text) {
         ttsBuffer = parts.pop() || "";
         for (const part of parts) {
           const value = part.trim();
-          if (value) enqueueTtsChunk(value);
+          if (value) ttsQueue.push(value);
         }
       }
 
-      // Nếu chưa gặp dấu câu, cắt mềm để TTS bắt đầu sớm,
-      // nhưng không cắt quá nhỏ để giảm số lần gọi Edge TTS.
-      while (ttsBuffer.length >= Number(CONFIG.ttsEarlyChunkChars || 120)) {
-        const limit = Number(CONFIG.ttsEarlyChunkChars || 120);
-        const cut = ttsBuffer.lastIndexOf(" ", limit);
-        const index = cut > 50 ? cut : limit;
-        const value = ttsBuffer.slice(0, index).trim();
-        ttsBuffer = ttsBuffer.slice(index).trimStart();
-        if (value) enqueueTtsChunk(value);
-      }
+      // Không cắt mềm theo số ký tự.
+      // Cắt giữa một câu làm TTS tạo nhiều đoạn audio nhỏ,
+      // dễ gây khoảng im lặng hoặc mất phần cuối câu.
+      // Câu dài sẽ được giữ nguyên và gửi thành một đoạn TTS.
 
       if (flush && ttsBuffer.trim()) {
-        enqueueTtsChunk(ttsBuffer.trim());
+        ttsQueue.push(ttsBuffer.trim());
         ttsBuffer = "";
       }
 
@@ -1050,7 +895,7 @@ async function prepareTtsAudio(text) {
       ui.systemMic.textContent = "Sẵn sàng";
       latestTranscript = "";
       if (!ui.stage.classList.contains("speaking")) {
-        setStatus("Mình đang sẵn sàng", "idle");
+        setStatus("Minh đang sẵn sàng", "idle");
       }
     }
   }
@@ -1130,7 +975,7 @@ async function prepareTtsAudio(text) {
       ui.talk.disabled = false;
       ui.systemMic.textContent = "Sẵn sàng";
       if (!ui.stage.classList.contains("speaking")) {
-        setStatus("Mình đang sẵn sàng", "idle");
+        setStatus("Minh đang sẵn sàng", "idle");
       }
     }
   };
