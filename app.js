@@ -11,7 +11,7 @@ const CONFIG = {
 
   // TTS timing: fail fast so MIMI can move to the next TTS path.
   // Xiaozhi is the first TTS path.
-  xiaozhiTtsTimeout: 3500,
+  xiaozhiTtsTimeout: 10000,
   mimiTtsTimeout: 4500,
 
   // Start speaking earlier while AI response is still streaming.
