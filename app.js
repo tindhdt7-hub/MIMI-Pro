@@ -24,6 +24,25 @@ const CONFIG = {
 
 const $ = (id) => document.getElementById(id);
 
+// ================================
+// MIMI CONVERSATION IDENTITY V1 - ADDITIVE
+// ================================
+function getPersistentId(key, prefix) {
+  try {
+    let value = localStorage.getItem(key);
+    if (!value) {
+      value = `${prefix}-${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`;
+      localStorage.setItem(key, value);
+    }
+    return value;
+  } catch {
+    return `${prefix}-${Date.now()}`;
+  }
+}
+
+const MIMI_USER_ID = getPersistentId(CONFIG.userIdKey, "mimi-user");
+const MIMI_SESSION_ID = getPersistentId(CONFIG.sessionIdKey, "mimi-session");
+
 const ui = {
   talk: $("talkButton"),
   quickTalk: $("quickTalk"),
@@ -212,7 +231,14 @@ async function streamMimi(text, onChunk) {
   const response = await fetch(CONFIG.localCoreUrl + "/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: text, provider: "local", stream: true }),
+    body: JSON.stringify({
+      message: text,
+      provider: "local",
+      stream: true,
+      user_id: MIMI_USER_ID,
+      session_id: MIMI_SESSION_ID,
+      source: "mimi-pro-web",
+    }),
     cache: "no-store"
   });
 
@@ -789,22 +815,9 @@ function getFastResponse(text) {
     };
 
     try {
-      // Fast path: answer trivial conversational intents locally.
-      // No Cloudflare/KV/Ollama round-trip is needed.
-      const fastAnswer = getFastResponse(cleanText);
-      if (fastAnswer) {
-        displayedAnswer = fastAnswer;
-        showConversation(cleanText, displayedAnswer);
-        setCoreState(true);
-        pushTtsChunk(displayedAnswer, true);
-        addActivity(`MIMI FAST: ${displayedAnswer}`);
-
-        while (ttsRunning || ttsQueue.length) {
-          await new Promise(resolve => setTimeout(resolve, 20));
-        }
-        return;
-      }
-
+      // Primary path: always go through MIMI AI Core so Memory and
+      // conversation context stay synchronized across turns.
+      // getFastResponse() remains available as an emergency fallback.
       const answer = await streamMimi(cleanText, (chunk) => {
         if (!chunk) return;
         displayedAnswer += chunk;
@@ -833,9 +846,26 @@ function getFastResponse(text) {
       }
     } catch (error) {
       console.error("MIMI CORE ERROR:", error);
+
+      // Emergency fallback only. Normal conversation never bypasses Core.
+      const fallback = getFastResponse(cleanText);
+      if (fallback) {
+        displayedAnswer = fallback;
+        showConversation(cleanText, displayedAnswer);
+        pushTtsChunk(displayedAnswer, true);
+        addActivity(`MIMI OFFLINE FAST: ${displayedAnswer}`);
+
+        while (ttsRunning || ttsQueue.length) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+
+        setCoreState(false);
+        return;
+      }
+
       setCoreState(false);
       setStatus("❌ AI CORE ERROR", "idle");
-      showConversation(cleanText, `Lỗi kết nối MIMI Core: ${error.message}`);
+      showConversation(cleanText, `Mình đang gặp lỗi kết nối với AI Core: ${error.message}`);
       addActivity("MIMI: Lỗi kết nối AI Core");
     } finally {
       isProcessing = false;
