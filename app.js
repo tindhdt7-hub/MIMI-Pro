@@ -9,12 +9,13 @@ const CONFIG = {
   xiaozhiTtsUrl: "http://127.0.0.1:8788/tts",
   xiaozhiTtsLanUrl: "http://192.168.1.186:8788/tts",
 
-  // TTS timing: fail fast so MIMI can move to the next TTS path.
-  // Xiaozhi is the first TTS path.
-  xiaozhiTtsTimeout: 3500,
-  mimiTtsTimeout: 4500,
+  // TTS timing: adaptive theo độ dài câu trả lời.
+  // Câu càng dài thì MIMI càng chờ lâu để Edge TTS tạo đủ audio.
+  // Không coi câu trả lời dài là lỗi.
+  ttsMinTimeout: 15000,
+  ttsMaxTimeout: 120000,
 
-  // Start speaking earlier while AI response is still streaming.
+  // Giữ cấu hình cũ để tương thích với các phần code khác.
   ttsEarlyChunkChars: 70,
 
   // MIMI PRO WEB → MIMI AI Core → TTS Bridge.
@@ -362,6 +363,19 @@ function waitForVietnameseVoice(timeout = 3000) {
   });
 }
 
+function getAdaptiveTtsTimeout(text) {
+  const value = String(text || "").trim();
+
+  // Edge TTS cần thời gian tạo audio trước khi response trả về.
+  // Ước lượng theo độ dài, nhưng luôn có mức tối thiểu và tối đa.
+  const estimated = 10000 + (value.length * 80);
+
+  return Math.min(
+    Number(CONFIG.ttsMaxTimeout || 120000),
+    Math.max(Number(CONFIG.ttsMinTimeout || 15000), estimated)
+  );
+}
+
 async function speakWithMimiWorkerTts(text) {
   const url = String(CONFIG.mimiTtsUrl || "").trim();
   const value = String(text || "").trim();
@@ -371,7 +385,7 @@ async function speakWithMimiWorkerTts(text) {
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
-    Number(CONFIG.mimiTtsTimeout || 4500)
+    getAdaptiveTtsTimeout(value)
   );
 
   try {
@@ -381,7 +395,7 @@ async function speakWithMimiWorkerTts(text) {
       body: JSON.stringify({
         text: value,
         language: "vi-VN",
-        voice: "vi-VN-HoaiMyNeural"
+        voice: "vi-VN-NamMinhNeural"
       }),
       cache: "no-store",
       signal: controller.signal
@@ -463,7 +477,7 @@ async function speakWithXiaozhi(text) {
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
-    Number(CONFIG.xiaozhiTtsTimeout || 3500)
+    getAdaptiveTtsTimeout(text)
   );
 
   try {
@@ -473,7 +487,7 @@ async function speakWithXiaozhi(text) {
       body: JSON.stringify({
         text: String(text || ""),
         language: "vi-VN",
-        voice: "vi-VN-HoaiMyNeural"
+        voice: "vi-VN-NamMinhNeural"
       }),
       cache: "no-store",
       signal: controller.signal
@@ -770,6 +784,11 @@ function getFastResponse(text) {
       const value = String(text || "").trim();
       if (!value) return false;
 
+      const adaptiveTimeout = getAdaptiveTtsTimeout(value);
+      console.log(
+        `MIMI Edge TTS: ${value.length} ký tự → timeout ${adaptiveTimeout} ms`
+      );
+
       const ok =
         await speakWithXiaozhi(value) ||
         await speakWithMimiWorkerTts(value);
@@ -855,7 +874,7 @@ function getFastResponse(text) {
       await speakFullAnswer(displayedAnswer);
 
       if (ttsFailed) {
-        addActivity("ℹ️ TTS Bridge lỗi ở một đoạn → Browser TTS đã fallback");
+        addActivity("ℹ️ Edge TTS không phát được toàn bộ câu → Browser TTS fallback");
       }
     } catch (error) {
       console.error("MIMI CORE ERROR:", error);
