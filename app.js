@@ -6,16 +6,15 @@ const CONFIG = {
   
   // MIMI PRO WEB → local Xiaozhi/Edge TTS bridge.
   // The bridge tested successfully on the laptop at port 8788.
-  xiaozhiTtsUrl: "http://127.0.0.1:8788/tts",
-  xiaozhiTtsLanUrl: "http://192.168.1.186:8788/tts",
+  xiaozhiTtsUrl: "http://127.0.0.1:8788/api/tts",
+  xiaozhiTtsLanUrl: "http://192.168.1.186:8788/api/tts",
 
-  // TTS timing: adaptive theo độ dài câu trả lời.
-  // Câu càng dài thì MIMI càng chờ lâu để Edge TTS tạo đủ audio.
-  // Không coi câu trả lời dài là lỗi.
+  // Full-answer TTS: AI trả lời xong mới gửi TOÀN BỘ văn bản 1 lần.
+  // Timeout tự tăng theo độ dài câu trả lời, không cắt câu thành nhiều request.
   ttsMinTimeout: 15000,
-  ttsMaxTimeout: 120000,
+  ttsMaxTimeout: 180000,
 
-  // Giữ cấu hình cũ để tương thích với các phần code khác.
+  // Giữ lại tên cấu hình cũ để tương thích với code/UI cũ.
   ttsEarlyChunkChars: 70,
 
   // MIMI PRO WEB → MIMI AI Core → TTS Bridge.
@@ -313,6 +312,15 @@ async function askMimi(text) {
   return answer || "MIMI chưa có câu trả lời.";
 }
 
+function getAdaptiveTtsTimeout(text) {
+  const length = String(text || "").trim().length;
+  const estimated = 15000 + (length * 70);
+  return Math.min(
+    Number(CONFIG.ttsMaxTimeout || 180000),
+    Math.max(Number(CONFIG.ttsMinTimeout || 15000), estimated)
+  );
+}
+
 function getSpeechVoices() {
   if (!("speechSynthesis" in window)) return [];
   return speechSynthesis.getVoices() || [];
@@ -363,22 +371,37 @@ function waitForVietnameseVoice(timeout = 3000) {
   });
 }
 
-function getAdaptiveTtsTimeout(text) {
-  const value = String(text || "").trim();
 
-  // Edge TTS cần thời gian tạo audio trước khi response trả về.
-  // Ước lượng theo độ dài, nhưng luôn có mức tối thiểu và tối đa.
-  const estimated = 10000 + (value.length * 80);
+// ================================
+// MIMI TTS NORMALIZER V1 - ADDITIVE
+// ================================
+// Chỉ chuẩn hóa bản text gửi vào TTS.
+// UI / AI Core / Memory vẫn giữ nguyên câu trả lời gốc.
+function normalizeTextForTTS(text) {
+  let value = String(text || "");
 
-  return Math.min(
-    Number(CONFIG.ttsMaxTimeout || 120000),
-    Math.max(Number(CONFIG.ttsMinTimeout || 15000), estimated)
-  );
+  const replacements = [
+    [/\bMIMI\b/gi, "Mi Mi"],
+    [/\bTTS\b/gi, "chuyển văn bản thành giọng nói"],
+    [/\bASR\b/gi, "nhận dạng giọng nói"],
+    [/\bVAD\b/gi, "phát hiện giọng nói"],
+    [/\bAI\b/gi, "trí tuệ nhân tạo"],
+    [/\bAPI\b/gi, "giao diện lập trình ứng dụng"],
+    [/\bMCP\b/gi, "giao thức kết nối công cụ"],
+    [/\bESP32-S3\b/gi, "bo mạch ESP ba hai S ba"],
+    [/\bESP32\b/gi, "bo mạch ESP ba hai"]
+  ];
+
+  for (const [pattern, replacement] of replacements) {
+    value = value.replace(pattern, replacement);
+  }
+
+  return value.replace(/\s+/g, " ").trim();
 }
 
 async function speakWithMimiWorkerTts(text) {
   const url = String(CONFIG.mimiTtsUrl || "").trim();
-  const value = String(text || "").trim();
+  const value = normalizeTextForTTS(text);
 
   if (!url || !value) return false;
 
@@ -598,7 +621,7 @@ async function speak(text) {
     return;
   }
 
-  const value = String(text || "").trim();
+  const value = normalizeTextForTTS(text);
   if (!value) return;
 
   // iPhone/Safari có thể giữ speechSynthesis ở trạng thái paused.
@@ -770,96 +793,19 @@ function getFastResponse(text) {
     showConversation(cleanText);
     addActivity(`Bạn: ${cleanText}`);
 
-    // TTS mới: chờ AI trả xong TOÀN BỘ câu trả lời rồi mới gửi 1 lần.
-    // Giữ lại queue/buffer cũ bên dưới để không phá cấu trúc và các fallback hiện tại.
-    const ttsQueue = [];
-    let ttsRunning = false;
-    let ttsFailed = false;
-    let ttsBuffer = "";
+    // TTS policy V2:
+    // - AI vẫn stream nội bộ để nhận câu trả lời nhanh.
+    // - Không gửi TTS từng chunk/câu.
+    // - Chờ AI Core trả lời hoàn tất, sau đó hiện TOÀN BỘ text một lần.
+    // - Gửi TOÀN BỘ câu trả lời sang Xiaozhi/Edge TTS đúng 1 request.
+    // - Không dùng Browser SpeechSynthesis làm đường TTS bình thường.
     let displayedAnswer = "";
 
-    // Đọc nguyên văn bản trả lời trong một request TTS duy nhất.
-    // Không chia câu/không chia chunk để tránh khoảng nghỉ 4-5 giây giữa các đoạn.
-    const speakFullAnswer = async (text) => {
-      const value = String(text || "").trim();
-      if (!value) return false;
-
-      const adaptiveTimeout = getAdaptiveTtsTimeout(value);
-      console.log(
-        `MIMI Edge TTS: ${value.length} ký tự → timeout ${adaptiveTimeout} ms`
-      );
-
-      const ok =
-        await speakWithXiaozhi(value) ||
-        await speakWithMimiWorkerTts(value);
-
-      if (ok) return true;
-
-      ttsFailed = true;
-      // Chỉ fallback Browser TTS khi cả 2 đường Edge TTS đều không phát được.
-      await speak(value);
-      return false;
-    };
-
-    const runTtsQueue = async () => {
-      if (ttsRunning) return;
-      ttsRunning = true;
-      try {
-        while (ttsQueue.length) {
-          const chunk = ttsQueue.shift();
-          // TTS priority: Xiaozhi → MIMI Worker TTS → Browser TTS.
-          const ok = await speakWithXiaozhi(chunk) || await speakWithMimiWorkerTts(chunk);
-          if (!ok) {
-            ttsFailed = true;
-            // Fallback browser TTS for the remaining stream text.
-            speak(chunk);
-          }
-        }
-      } finally {
-        ttsRunning = false;
-      }
-    };
-
-    const pushTtsChunk = (chunk, flush = false) => {
-      ttsBuffer += String(chunk || "");
-
-      // Ưu tiên phát theo câu, tránh TTS từng token quá vụn.
-      const parts = ttsBuffer.split(/(?<=[.!?。！？])\s+/);
-      if (parts.length > 1) {
-        ttsBuffer = parts.pop() || "";
-        for (const part of parts) {
-          const value = part.trim();
-          if (value) ttsQueue.push(value);
-        }
-      }
-
-      // Nếu chưa gặp dấu câu, cắt mềm sớm hơn để TTS bắt đầu
-      // ngay khi AI vẫn đang streaming.
-      while (ttsBuffer.length >= Number(CONFIG.ttsEarlyChunkChars || 70)) {
-        const limit = Number(CONFIG.ttsEarlyChunkChars || 70);
-        const cut = ttsBuffer.lastIndexOf(" ", limit);
-        const index = cut > 30 ? cut : limit;
-        const value = ttsBuffer.slice(0, index).trim();
-        ttsBuffer = ttsBuffer.slice(index).trimStart();
-        if (value) ttsQueue.push(value);
-      }
-
-      if (flush && ttsBuffer.trim()) {
-        ttsQueue.push(ttsBuffer.trim());
-        ttsBuffer = "";
-      }
-
-      runTtsQueue();
-    };
-
     try {
-      // Primary path: always go through MIMI AI Core so Memory and
-      // conversation context stay synchronized across turns.
-      // getFastResponse() remains available as an emergency fallback.
+      // Primary path: luôn đi qua MIMI AI Core để giữ Memory/Context đồng bộ.
+      // Callback chỉ GHÉP text, tuyệt đối không gọi TTS trong lúc stream.
       const answer = await streamMimi(cleanText, (chunk) => {
         if (!chunk) return;
-        // Vẫn nhận streaming từ AI Core nhưng KHÔNG đưa từng chunk vào TTS.
-        // Chỉ gom text để hiển thị một lần khi AI đã trả lời xong.
         displayedAnswer += chunk;
         setCoreState(true);
       });
@@ -868,14 +814,32 @@ function getFastResponse(text) {
         displayedAnswer = answer;
       }
 
-      // Hiển thị TOÀN BỘ câu trả lời trước. Ngay sau đó Edge TTS đọc nguyên câu.
+      displayedAnswer = String(displayedAnswer || "MIMI chưa có câu trả lời.").trim();
+
+      // Hiện toàn bộ câu trả lời một lần, sau khi AI Core đã hoàn tất.
       showConversation(cleanText, displayedAnswer);
       addActivity(`MIMI: ${displayedAnswer}`);
-      await speakFullAnswer(displayedAnswer);
 
-      if (ttsFailed) {
-        addActivity("ℹ️ Edge TTS không phát được toàn bộ câu → Browser TTS fallback");
+      // Một request TTS duy nhất cho toàn bộ câu trả lời.
+      const ttsTimeout = getAdaptiveTtsTimeout(displayedAnswer);
+      console.log(
+        `🎙️ MIMI FULL TTS: ${displayedAnswer.length} chars, timeout ${ttsTimeout} ms`
+      );
+
+      setStatus("🔊 MIMI ĐANG CHUẨN BỊ GIỌNG…", "speaking");
+      ui.systemSpeaker.textContent = "Đang chuẩn bị";
+
+      const ttsOk =
+        await speakWithXiaozhi(displayedAnswer) ||
+        await speakWithMimiWorkerTts(displayedAnswer);
+
+      if (!ttsOk) {
+        // Không gọi Browser TTS vì thiết bị không đảm bảo có giọng tiếng Việt.
+        setStatus("⚠️ TTS CHƯA SẴN SÀNG", "idle");
+        ui.systemSpeaker.textContent = "TTS lỗi";
+        addActivity("⚠️ Edge TTS không trả được audio");
       }
+    
     } catch (error) {
       console.error("MIMI CORE ERROR:", error);
 
@@ -885,7 +849,8 @@ function getFastResponse(text) {
         displayedAnswer = fallback;
         showConversation(cleanText, displayedAnswer);
         addActivity(`MIMI OFFLINE FAST: ${displayedAnswer}`);
-        await speakFullAnswer(displayedAnswer);
+        showConversation(cleanText, displayedAnswer);
+        await speakWithXiaozhi(displayedAnswer) || await speakWithMimiWorkerTts(displayedAnswer);
 
         setCoreState(false);
         return;
