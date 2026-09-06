@@ -69,6 +69,25 @@ const ui = {
   overlay: $("mobileOverlay")
 };
 
+// ================================
+// MIMI TIMING DEBUG V1 - TEST ONLY
+// ================================
+const MIMI_TIMING_DEBUG = true;
+let mimiTiming = null;
+function timingNow(){ return performance.now(); }
+function timingStart(text){ if(!MIMI_TIMING_DEBUG)return; mimiTiming={start:timingNow(),userText:String(text||''),coreStart:null,fullText:null,textDisplayed:null,ttsRequest:null,ttsResponse:null,audioFirst:null,audioPlay:null,audioEnd:null}; renderTimingDebug(); }
+function timingMark(key){ if(!MIMI_TIMING_DEBUG||!mimiTiming)return; mimiTiming[key]=timingNow(); renderTimingDebug(); }
+function timingDelta(a,b='start'){ if(!mimiTiming||mimiTiming[a]==null||mimiTiming[b]==null)return null; return Math.max(0,mimiTiming[a]-mimiTiming[b]); }
+function timingSec(ms){ return ms==null?'—':`${(ms/1000).toFixed(2)} s`; }
+function renderTimingDebug(){
+  if(!MIMI_TIMING_DEBUG)return;
+  let box=document.getElementById('mimiTimingDebug');
+  if(!box){ box=document.createElement('div'); box.id='mimiTimingDebug'; box.style.cssText='position:fixed;right:12px;bottom:12px;z-index:99999;width:min(330px,calc(100vw - 24px));padding:12px 14px;border:1px solid rgba(255,255,255,.18);border-radius:12px;background:rgba(12,16,24,.94);color:#fff;font:12px/1.55 monospace;box-shadow:0 8px 30px rgba(0,0,0,.35);backdrop-filter:blur(8px)'; document.body.appendChild(box); }
+  if(!mimiTiming){box.innerHTML='<b>MIMI TIMING DEBUG</b><br>Chưa có lượt test.';return;}
+  const rows=[['AI bắt đầu',timingSec(timingDelta('coreStart'))],['FULL TEXT nhận đủ',timingSec(timingDelta('fullText'))],['Text hiển thị',timingSec(timingDelta('textDisplayed','fullText'))],['Gọi TTS',timingSec(timingDelta('ttsRequest','fullText'))],['TTS phản hồi',timingSec(timingDelta('ttsResponse','ttsRequest'))],['Audio đầu tiên',timingSec(timingDelta('audioFirst','ttsRequest'))],['Bắt đầu nói',timingSec(timingDelta('audioPlay','ttsRequest'))],['FULL TEXT → nói',timingSec(timingDelta('audioPlay','fullText'))]];
+  box.innerHTML='<b>MIMI TIMING DEBUG</b><br><span style="opacity:.7">'+mimiTiming.userText.slice(0,70)+'</span><hr style="opacity:.2">'+rows.map(([k,v])=>`<div style="display:flex;justify-content:space-between;gap:10px"><span>${k}</span><b>${v}</b></div>`).join('');
+}
+
 let recognition = null;
 let isListening = false;
 let isProcessing = false;
@@ -435,6 +454,7 @@ async function speakWithMimiWorkerTts(text) {
 
     if (contentType.includes("audio/")) {
       const blob = await response.blob();
+      timingMark("audioFirst");
       return await playTtsAudioBlob(blob);
     }
 
@@ -515,6 +535,8 @@ async function speakWithXiaozhi(text) {
       cache: "no-store",
       signal: controller.signal
     });
+
+    timingMark("ttsResponse");
 
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
@@ -645,6 +667,7 @@ async function speak(text) {
   utterance.volume = 1;
 
   utterance.onstart = () => {
+    timingMark("audioPlay");
     setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
     ui.systemSpeaker.textContent = "Đang nói";
   };
@@ -784,6 +807,8 @@ function getFastResponse(text) {
     if (!cleanText || isProcessing) return;
 
     isProcessing = true;
+    timingStart(cleanText);
+    timingMark("coreStart");
     manualStopRequested = false;
     clearTimeout(manualStopTimer);
     ui.talk.disabled = true;
@@ -815,9 +840,11 @@ function getFastResponse(text) {
       }
 
       displayedAnswer = String(displayedAnswer || "MIMI chưa có câu trả lời.").trim();
+      timingMark("fullText");
 
       // Hiện toàn bộ câu trả lời một lần, sau khi AI Core đã hoàn tất.
       showConversation(cleanText, displayedAnswer);
+      timingMark("textDisplayed");
       addActivity(`MIMI: ${displayedAnswer}`);
 
       // Một request TTS duy nhất cho toàn bộ câu trả lời.
@@ -829,9 +856,23 @@ function getFastResponse(text) {
       setStatus("🔊 MIMI ĐANG CHUẨN BỊ GIỌNG…", "speaking");
       ui.systemSpeaker.textContent = "Đang chuẩn bị";
 
-      const ttsOk =
-        await speakWithXiaozhi(displayedAnswer) ||
-        await speakWithMimiWorkerTts(displayedAnswer);
+      // Local Edge TTS is the primary path. Retry transient LAN/Edge failures
+      // before using the cloud Worker fallback. Still only ONE successful audio
+      // response is played for the whole answer.
+      let ttsOk = false;
+      for (let attempt = 1; attempt <= 2 && !ttsOk; attempt++) {
+        console.log(`🎙️ Local Edge TTS attempt ${attempt}/2`);
+        timingMark("ttsRequest");
+        ttsOk = await speakWithXiaozhi(displayedAnswer);
+        if (!ttsOk && attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
+      }
+
+      if (!ttsOk) {
+        console.warn("⚠️ Local Edge TTS failed twice; trying Worker TTS once.");
+        ttsOk = await speakWithMimiWorkerTts(displayedAnswer);
+      }
 
       if (!ttsOk) {
         // Không gọi Browser TTS vì thiết bị không đảm bảo có giọng tiếng Việt.
