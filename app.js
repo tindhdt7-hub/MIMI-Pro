@@ -502,7 +502,7 @@ async function speakWithMimiWorkerTts(text) {
 function getTtsStreamUrl(url) {
   const value = String(url || "").trim();
   if (!value) return "";
-  if (value.endsWith("/api/tts")) return `${value}/stream-http`;
+  if (value.endsWith("/api/tts")) return `${value}/stream`;
   return value;
 }
 
@@ -529,6 +529,10 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
   const audioUrl = URL.createObjectURL(mediaSource);
   const audio = new Audio();
   audio.preload = "auto";
+  // Start the media element as soon as the first MSE data becomes playable.
+  // Do not wait for the play() promise here: waiting on it can add an
+  // unnecessary buffering delay before the browser emits `playing`.
+  audio.autoplay = true;
   audio.src = audioUrl;
 
   let sourceBuffer = null;
@@ -572,12 +576,15 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
       sourceBuffer = mediaSource.addSourceBuffer(mime);
       sourceBuffer.mode = "sequence";
       sourceBuffer.addEventListener("updateend", () => {
-        if (!playStarted && audio.readyState >= 2) {
-          playStarted = true;
-          timingMark("audioPlay");
-          setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
-          ui.systemSpeaker.textContent = "Đang nói";
-          audio.play().catch(fail);
+        // Kick playback immediately after the first buffer update. The
+        // browser will wait internally until it has enough decodable data;
+        // our JS must not add another artificial wait.
+        if (!playStarted) {
+          audio.play().catch(() => {
+            // A later `playing` event or the reader loop will retry when data
+            // is available. Do not fail the whole stream for a transient
+            // not-ready playback promise.
+          });
         }
         appendNext();
       });
@@ -626,14 +633,11 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
       queue.push(new Uint8Array(value).buffer);
       appendNext();
 
-      // Start playback as soon as the first buffered audio is ready.
-      if (!playStarted && audio.readyState >= 2) {
-        try {
-          await audio.play();
-        } catch (error) {
-          fail(error);
-          break;
-        }
+      // Ask the media element to start immediately. Do not await the promise:
+      // awaiting it here can stall the stream reader and add several seconds
+      // of extra buffering before the `playing` event.
+      if (!playStarted) {
+        audio.play().catch(() => {});
       }
     }
 
@@ -641,11 +645,7 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
     appendNext();
 
     if (!playStarted && !failed) {
-      try {
-        await audio.play();
-      } catch (error) {
-        fail(error);
-      }
+      audio.play().catch(() => {});
     }
 
     return await playbackDone;
@@ -664,7 +664,7 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
 
 async function speakWithXiaozhi(text) {
   // Xiaozhi/Edge TTS vẫn là adapter TTS của MIMI.
-  // Chỉ nâng cấp đường nhận audio: /api/tts -> /api/tts/stream-http.
+  // Chỉ nâng cấp đường nhận audio: /api/tts -> /api/tts/stream.
   // Một câu trả lời = một request TTS; audio được phát ngay từ chunk đầu.
   const isLocalHost =
     location.hostname === "localhost" ||
@@ -946,6 +946,220 @@ function getFastResponse(text) {
   return null;
 }
 
+
+// ================================
+// MIMI VOICE REALTIME V1 - XIAOZHI STYLE
+// ================================
+// AI Core vẫn là bộ não của MIMI. Voice chỉ nhận text stream, gom thành
+// các đoạn nói tự nhiên và đưa TTS chạy song song với phần AI còn lại.
+// UI vẫn đợi FULL TEXT để hiển thị một lần.
+function createMimiRealtimeVoice() {
+  const queue = [];
+  const prepared = new Map();
+  let nextIndex = 0;
+  let running = false;
+  let finished = false;
+  let firstSpoken = false;
+  const MAX_PREFETCH = 2;
+  let doneResolve;
+
+  const done = new Promise(resolve => { doneResolve = resolve; });
+
+  function normalizeSegment(text) {
+    return normalizeTextForTTS(String(text || "").replace(/\s+/g, " ").trim());
+  }
+
+  function splitSpeakable(buffer, flush = false) {
+    const value = String(buffer || "");
+    const parts = [];
+    let start = 0;
+
+    // Ưu tiên kết thúc câu. Không cắt theo token/chữ cái.
+    const re = /[.!?…。！？]+(?:["'”’)]*)?(?=\s|$)/g;
+    let match;
+    while ((match = re.exec(value))) {
+      const end = match.index + match[0].length;
+      const part = value.slice(start, end).trim();
+      if (part) parts.push(part);
+      start = end;
+    }
+
+    let rest = value.slice(start);
+
+    // Nếu AI đang stream rất dài mà chưa có dấu câu, cho phép cắt ở
+    // dấu phẩy/chấm phẩy sau ~55 ký tự để tránh giữ Voice im quá lâu.
+    if (!flush && rest.length >= 55) {
+      const cut = rest.search(/[,;:](?=\s)/);
+      if (cut >= 25) {
+        parts.push(rest.slice(0, cut + 1).trim());
+        rest = rest.slice(cut + 1);
+      }
+    }
+
+    if (flush && rest.trim()) {
+      parts.push(rest.trim());
+      rest = "";
+    }
+
+    return { parts, rest };
+  }
+
+  async function fetchPreparedAudio(segment) {
+    const isLocalHost =
+      location.hostname === "localhost" ||
+      location.hostname === "127.0.0.1" ||
+      location.hostname === "::1";
+
+    const baseUrl = String(
+      isLocalHost
+        ? (CONFIG.xiaozhiTtsUrl || "")
+        : (CONFIG.xiaozhiTtsLanUrl || CONFIG.xiaozhiTtsUrl || "")
+    ).trim();
+    const url = getTtsStreamUrl(baseUrl);
+    if (!url) throw new Error("TTS URL chưa cấu hình");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      getAdaptiveTtsTimeout(segment)
+    );
+
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: normalizeSegment(segment),
+          language: "vi-VN",
+          voice: "vi-VN-NamMinhNeural"
+        }),
+        cache: "no-store",
+        signal: controller.signal
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`TTS HTTP ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const chunks = [];
+      let total = 0;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value || !value.byteLength) continue;
+        chunks.push(value);
+        total += value.byteLength;
+      }
+
+      if (!total) throw new Error("TTS không trả audio");
+      const merged = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return new Blob([merged], { type: "audio/mpeg" });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  function prepareAhead(segment, index) {
+    if (!segment || prepared.has(index)) return;
+    if (prepared.size >= MAX_PREFETCH) return;
+    prepared.set(index, fetchPreparedAudio(segment).catch(error => {
+      prepared.delete(index);
+      return null;
+    }));
+  }
+
+  async function playPrepared(index, segment) {
+    const promise = prepared.get(index);
+    if (promise) {
+      const blob = await promise;
+      prepared.delete(index);
+      if (blob) return await playTtsAudioBlob(blob);
+    }
+    return await speakWithXiaozhi(segment);
+  }
+
+  function fillPrefetchWindow() {
+    if (!queue.length) return;
+    for (const item of queue) {
+      if (prepared.size >= MAX_PREFETCH) break;
+      if (item.index > 0) prepareAhead(item.text, item.index);
+    }
+  }
+
+  async function pump() {
+    if (running) return;
+    running = true;
+
+    try {
+      while (queue.length) {
+        fillPrefetchWindow();
+        const item = queue.shift();
+        const { text, index } = item;
+
+        // Giữ một cửa sổ nhỏ các đoạn kế tiếp đang được chuẩn bị.
+        fillPrefetchWindow();
+
+        let ok;
+        if (!firstSpoken) {
+          // Đoạn đầu dùng streaming trực tiếp để phát ngay FIRST AUDIO.
+          timingMark("ttsRequest");
+          ok = await speakWithXiaozhi(text);
+          if (ok) firstSpoken = true;
+        } else {
+          ok = await playPrepared(index, text);
+        }
+
+        if (!ok) {
+          addActivity("⚠️ Realtime TTS lỗi ở một đoạn; thử TTS dự phòng");
+          const fallbackOk = await speakWithMimiWorkerTts(text);
+          if (!fallbackOk) break;
+        }
+      }
+    } finally {
+      running = false;
+      if (finished && !queue.length) doneResolve(true);
+    }
+  }
+
+  return {
+    push(text) {
+      let pending = String(this._buffer || "") + String(text || "");
+      let split = splitSpeakable(pending, false);
+      this._buffer = split.rest;
+      for (const part of split.parts) {
+        const clean = normalizeSegment(part);
+        if (!clean) continue;
+        const item = { text: part, index: nextIndex++ };
+        queue.push(item);
+        // Các đoạn sau được prefetch ngay khi AI stream tới, để TTS của
+        // đoạn kế tiếp có thể chạy song song với việc phát đoạn hiện tại.
+        if (item.index > 0) prepareAhead(item.text, item.index);
+      }
+      pump();
+    },
+    finish() {
+      const split = splitSpeakable(String(this._buffer || ""), true);
+      this._buffer = "";
+      for (const part of split.parts) {
+        const clean = normalizeSegment(part);
+        if (!clean) continue;
+        queue.push({ text: part, index: nextIndex++ });
+      }
+      finished = true;
+      pump();
+      if (!running && !queue.length) doneResolve(true);
+      return done;
+    },
+    _buffer: ""
+  };
+}
+
   async function processUserText(finalText) {
     const cleanText = (finalText || "").trim();
     if (!cleanText || isProcessing) return;
@@ -962,50 +1176,21 @@ function getFastResponse(text) {
     showConversation(cleanText);
     addActivity(`Bạn: ${cleanText}`);
 
-    // Fast path: các câu giao tiếp cực đơn giản không cần đi qua AI Core.
-    // Tận dụng getFastResponse() đã có sẵn, giúp "MIMI chào cậu",
-    // "cậu có nghe không", "cảm ơn"... phản hồi gần như tức thì.
-    const fastResponse = getFastResponse(cleanText);
-    if (fastResponse) {
-      displayedAnswer = fastResponse;
-      timingMark("fullText");
-      showConversation(cleanText, displayedAnswer);
-      timingMark("textDisplayed");
-      addActivity(`MIMI: ${displayedAnswer}`);
-
-      try {
-        timingMark("ttsRequest");
-        console.log(`🎙️ MIMI FAST TTS: ${displayedAnswer.length} chars`);
-        ttsOk = await speakWithXiaozhi(displayedAnswer);
-
-        if (!ttsOk) {
-          console.warn("⚠️ Local Edge TTS failed; trying Worker TTS once.");
-          ttsOk = await speakWithMimiWorkerTts(displayedAnswer);
-        }
-      } catch (ttsError) {
-        console.warn("Fast-path TTS error:", ttsError);
-        ttsOk = await speakWithMimiWorkerTts(displayedAnswer);
-      }
-
-      setCoreState(true);
-      return;
-    }
-
-    // TTS policy V2:
-    // - AI vẫn stream nội bộ để nhận câu trả lời nhanh.
-    // - Không gửi TTS từng chunk/câu.
-    // - Chờ AI Core trả lời hoàn tất, sau đó hiện TOÀN BỘ text một lần.
-    // - Gửi TOÀN BỘ câu trả lời sang Xiaozhi/Edge TTS đúng 1 request.
-    // - Không dùng Browser SpeechSynthesis làm đường TTS bình thường.
+    // Voice Realtime V1:
+    // - AI Core vẫn stream như cũ.
+    // - Voice tách các đoạn nói tự nhiên theo dấu câu.
+    // - Đoạn đầu bắt đầu TTS ngay khi có thể nói; không chờ FULL TEXT.
+    // - Các đoạn sau được chuẩn bị trước trong lúc MIMI đang nói.
+    // - UI vẫn chỉ hiển thị FULL TEXT một lần sau khi AI hoàn tất.
     let displayedAnswer = "";
-    let ttsOk = false;
+    const realtimeVoice = createMimiRealtimeVoice();
 
     try {
       // Primary path: luôn đi qua MIMI AI Core để giữ Memory/Context đồng bộ.
-      // Callback chỉ GHÉP text, tuyệt đối không gọi TTS trong lúc stream.
       const answer = await streamMimi(cleanText, (chunk) => {
         if (!chunk) return;
         displayedAnswer += chunk;
+        realtimeVoice.push(chunk);
         setCoreState(true);
       });
 
@@ -1016,40 +1201,17 @@ function getFastResponse(text) {
       displayedAnswer = String(displayedAnswer || "MIMI chưa có câu trả lời.").trim();
       timingMark("fullText");
 
-      // Hiện toàn bộ câu trả lời một lần, sau khi AI Core đã hoàn tất.
+      // Đánh dấu Voice đã nhận đủ câu và cho đoạn cuối được phát.
+      // UI vẫn hiển thị FULL TEXT nguyên vẹn, không thay đổi.
+      const voiceDone = realtimeVoice.finish();
+
       showConversation(cleanText, displayedAnswer);
+      timingMark("fullText");
       timingMark("textDisplayed");
       addActivity(`MIMI: ${displayedAnswer}`);
 
-      // Một request TTS duy nhất cho toàn bộ câu trả lời.
-      const ttsTimeout = getAdaptiveTtsTimeout(displayedAnswer);
-      console.log(
-        `🎙️ MIMI FULL TTS: ${displayedAnswer.length} chars, timeout ${ttsTimeout} ms`
-      );
-
-      setStatus("🔊 MIMI ĐANG CHUẨN BỊ GIỌNG…", "speaking");
-      ui.systemSpeaker.textContent = "Đang chuẩn bị";
-
-      // Local Edge TTS is the primary path. Retry transient LAN/Edge failures
-      // before using the cloud Worker fallback. Still only ONE successful audio
-      // response is played for the whole answer.
-      // TTS server đã có retry nội bộ trước FIRST AUDIO.
-      // Không retry thêm ở app để tránh chồng retry và làm câu ngắn bị kéo dài.
-      console.log("🎙️ Local Edge TTS request 1/1");
-      timingMark("ttsRequest");
-      ttsOk = await speakWithXiaozhi(displayedAnswer);
-
-      if (!ttsOk) {
-        console.warn("⚠️ Local Edge TTS failed twice; trying Worker TTS once.");
-        ttsOk = await speakWithMimiWorkerTts(displayedAnswer);
-      }
-
-      if (!ttsOk) {
-        // Không gọi Browser TTS vì thiết bị không đảm bảo có giọng tiếng Việt.
-        setStatus("⚠️ TTS CHƯA SẴN SÀNG", "idle");
-        ui.systemSpeaker.textContent = "TTS lỗi";
-        addActivity("⚠️ Edge TTS không trả được audio");
-      }
+      // Chờ Voice hoàn tất để trạng thái SPEAKING/IDLE kết thúc đúng phiên.
+      await voiceDone;
     
     } catch (error) {
       console.error("MIMI CORE ERROR:", error);
