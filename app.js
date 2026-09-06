@@ -529,14 +529,12 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
   const audioUrl = URL.createObjectURL(mediaSource);
   const audio = new Audio();
   audio.preload = "auto";
-  audio.autoplay = true;
   audio.src = audioUrl;
 
   let sourceBuffer = null;
   let queue = [];
   let streamDone = false;
   let failed = false;
-  let playRequested = false;
   let playStarted = false;
   let firstChunkMarked = false;
   let resolvePlayback;
@@ -553,42 +551,6 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
     rejectPlayback(error instanceof Error ? error : new Error(String(error || "TTS stream failed")));
   };
 
-  /*
-   * Playback optimization:
-   * Không chờ readyState >= 2 và cũng không await audio.play().
-   * Chrome có thể giữ play() promise pending trong lúc MediaSource
-   * đang nhận dữ liệu. Gọi play() ngay khi chunk đầu tiên được append,
-   * rồi gọi lại sau mỗi updateend/chunk nếu cần.
-   */
-  const requestPlayback = () => {
-    if (failed || playStarted || playRequested) return;
-
-    playRequested = true;
-    const promise = audio.play();
-
-    if (promise?.catch) {
-      promise.catch(error => {
-        playRequested = false;
-
-        // Nếu browser chỉ đang chờ thêm dữ liệu thì thử lại ở chunk/updateend kế tiếp.
-        // Chỉ coi lỗi là fatal khi nó thực sự là lỗi playback/policy.
-        const name = String(error?.name || "");
-        const message = String(error?.message || "");
-        if (name === "NotAllowedError") {
-          fail(error);
-          return;
-        }
-
-        if (name === "AbortError" || /no supported|source|media/i.test(message)) {
-          return;
-        }
-
-        // Không làm rơi toàn bộ TTS chỉ vì một lần play() sớm bị từ chối.
-        console.warn("TTS play sớm chưa sẵn sàng, sẽ thử lại:", error);
-      });
-    }
-  };
-
   const appendNext = () => {
     if (failed || !sourceBuffer || sourceBuffer.updating || !queue.length) {
       if (!failed && streamDone && sourceBuffer && !sourceBuffer.updating && !queue.length) {
@@ -600,9 +562,6 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
     const chunk = queue.shift();
     try {
       sourceBuffer.appendBuffer(chunk);
-
-      // Quan trọng: yêu cầu playback ngay sau khi chunk đầu được đưa vào MSE.
-      requestPlayback();
     } catch (error) {
       fail(error);
     }
@@ -612,14 +571,16 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
     try {
       sourceBuffer = mediaSource.addSourceBuffer(mime);
       sourceBuffer.mode = "sequence";
-
       sourceBuffer.addEventListener("updateend", () => {
-        // Không kiểm tra readyState ở đây nữa.
-        // audio.play() được yêu cầu càng sớm càng tốt và không block stream.
-        requestPlayback();
+        if (!playStarted && audio.readyState >= 2) {
+          playStarted = true;
+          timingMark("audioPlay");
+          setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
+          ui.systemSpeaker.textContent = "Đang nói";
+          audio.play().catch(fail);
+        }
         appendNext();
       });
-
       sourceBuffer.addEventListener("error", () => fail(new Error("MediaSource SourceBuffer error")));
       appendNext();
     } catch (error) {
@@ -632,7 +593,6 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
       playStarted = true;
       timingMark("audioPlay");
     }
-
     setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
     ui.systemSpeaker.textContent = "Đang nói";
   });
@@ -652,7 +612,6 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
 
   try {
     const reader = response.body.getReader();
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -663,17 +622,31 @@ async function playTtsStream(response, contentType = "audio/mpeg") {
         timingMark("audioFirst");
       }
 
-      // Copy Uint8Array vì buffer của reader có thể được tái sử dụng.
+      // Copy the Uint8Array because the reader's buffer may be reused.
       queue.push(new Uint8Array(value).buffer);
       appendNext();
 
-      // Không await. Chỉ yêu cầu browser bắt đầu phát sớm nhất có thể.
-      requestPlayback();
+      // Start playback as soon as the first buffered audio is ready.
+      if (!playStarted && audio.readyState >= 2) {
+        try {
+          await audio.play();
+        } catch (error) {
+          fail(error);
+          break;
+        }
+      }
     }
 
     streamDone = true;
     appendNext();
-    requestPlayback();
+
+    if (!playStarted && !failed) {
+      try {
+        await audio.play();
+      } catch (error) {
+        fail(error);
+      }
+    }
 
     return await playbackDone;
   } catch (error) {
@@ -989,6 +962,35 @@ function getFastResponse(text) {
     showConversation(cleanText);
     addActivity(`Bạn: ${cleanText}`);
 
+    // Fast path: các câu giao tiếp cực đơn giản không cần đi qua AI Core.
+    // Tận dụng getFastResponse() đã có sẵn, giúp "MIMI chào cậu",
+    // "cậu có nghe không", "cảm ơn"... phản hồi gần như tức thì.
+    const fastResponse = getFastResponse(cleanText);
+    if (fastResponse) {
+      displayedAnswer = fastResponse;
+      timingMark("fullText");
+      showConversation(cleanText, displayedAnswer);
+      timingMark("textDisplayed");
+      addActivity(`MIMI: ${displayedAnswer}`);
+
+      try {
+        timingMark("ttsRequest");
+        console.log(`🎙️ MIMI FAST TTS: ${displayedAnswer.length} chars`);
+        ttsOk = await speakWithXiaozhi(displayedAnswer);
+
+        if (!ttsOk) {
+          console.warn("⚠️ Local Edge TTS failed; trying Worker TTS once.");
+          ttsOk = await speakWithMimiWorkerTts(displayedAnswer);
+        }
+      } catch (ttsError) {
+        console.warn("Fast-path TTS error:", ttsError);
+        ttsOk = await speakWithMimiWorkerTts(displayedAnswer);
+      }
+
+      setCoreState(true);
+      return;
+    }
+
     // TTS policy V2:
     // - AI vẫn stream nội bộ để nhận câu trả lời nhanh.
     // - Không gửi TTS từng chunk/câu.
@@ -996,6 +998,7 @@ function getFastResponse(text) {
     // - Gửi TOÀN BỘ câu trả lời sang Xiaozhi/Edge TTS đúng 1 request.
     // - Không dùng Browser SpeechSynthesis làm đường TTS bình thường.
     let displayedAnswer = "";
+    let ttsOk = false;
 
     try {
       // Primary path: luôn đi qua MIMI AI Core để giữ Memory/Context đồng bộ.
@@ -1030,15 +1033,11 @@ function getFastResponse(text) {
       // Local Edge TTS is the primary path. Retry transient LAN/Edge failures
       // before using the cloud Worker fallback. Still only ONE successful audio
       // response is played for the whole answer.
-      let ttsOk = false;
-      for (let attempt = 1; attempt <= 2 && !ttsOk; attempt++) {
-        console.log(`🎙️ Local Edge TTS attempt ${attempt}/2`);
-        timingMark("ttsRequest");
-        ttsOk = await speakWithXiaozhi(displayedAnswer);
-        if (!ttsOk && attempt < 2) {
-          await new Promise(resolve => setTimeout(resolve, 800));
-        }
-      }
+      // TTS server đã có retry nội bộ trước FIRST AUDIO.
+      // Không retry thêm ở app để tránh chồng retry và làm câu ngắn bị kéo dài.
+      console.log("🎙️ Local Edge TTS request 1/1");
+      timingMark("ttsRequest");
+      ttsOk = await speakWithXiaozhi(displayedAnswer);
 
       if (!ttsOk) {
         console.warn("⚠️ Local Edge TTS failed twice; trying Worker TTS once.");
