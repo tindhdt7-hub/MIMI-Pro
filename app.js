@@ -499,22 +499,184 @@ async function speakWithMimiWorkerTts(text) {
   }
 }
 
+function getTtsStreamUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  if (value.endsWith("/api/tts")) return `${value}/stream-http`;
+  return value;
+}
+
+async function playTtsStream(response, contentType = "audio/mpeg") {
+  if (!response?.body) {
+    console.warn("TTS streaming không có response.body");
+    return false;
+  }
+
+  if (!("MediaSource" in window)) {
+    console.warn("Trình duyệt không hỗ trợ MediaSource; bỏ qua local streaming TTS.");
+    addActivity("⚠️ Trình duyệt không hỗ trợ TTS streaming");
+    return false;
+  }
+
+  const mime = String(contentType || "audio/mpeg").split(";")[0].trim() || "audio/mpeg";
+  if (!MediaSource.isTypeSupported(mime)) {
+    console.warn("MediaSource không hỗ trợ MIME:", mime);
+    addActivity(`⚠️ Không hỗ trợ audio streaming: ${mime}`);
+    return false;
+  }
+
+  const mediaSource = new MediaSource();
+  const audioUrl = URL.createObjectURL(mediaSource);
+  const audio = new Audio();
+  audio.preload = "auto";
+  audio.src = audioUrl;
+
+  let sourceBuffer = null;
+  let queue = [];
+  let streamDone = false;
+  let failed = false;
+  let playStarted = false;
+  let firstChunkMarked = false;
+  let resolvePlayback;
+  let rejectPlayback;
+
+  const playbackDone = new Promise((resolve, reject) => {
+    resolvePlayback = resolve;
+    rejectPlayback = reject;
+  });
+
+  const fail = (error) => {
+    if (failed) return;
+    failed = true;
+    rejectPlayback(error instanceof Error ? error : new Error(String(error || "TTS stream failed")));
+  };
+
+  const appendNext = () => {
+    if (failed || !sourceBuffer || sourceBuffer.updating || !queue.length) {
+      if (!failed && streamDone && sourceBuffer && !sourceBuffer.updating && !queue.length) {
+        try { mediaSource.endOfStream(); } catch {}
+      }
+      return;
+    }
+
+    const chunk = queue.shift();
+    try {
+      sourceBuffer.appendBuffer(chunk);
+    } catch (error) {
+      fail(error);
+    }
+  };
+
+  mediaSource.addEventListener("sourceopen", () => {
+    try {
+      sourceBuffer = mediaSource.addSourceBuffer(mime);
+      sourceBuffer.mode = "sequence";
+      sourceBuffer.addEventListener("updateend", () => {
+        if (!playStarted && audio.readyState >= 2) {
+          playStarted = true;
+          timingMark("audioPlay");
+          setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
+          ui.systemSpeaker.textContent = "Đang nói";
+          audio.play().catch(fail);
+        }
+        appendNext();
+      });
+      sourceBuffer.addEventListener("error", () => fail(new Error("MediaSource SourceBuffer error")));
+      appendNext();
+    } catch (error) {
+      fail(error);
+    }
+  }, { once: true });
+
+  audio.addEventListener("playing", () => {
+    if (!playStarted) {
+      playStarted = true;
+      timingMark("audioPlay");
+    }
+    setStatus("🔊 MIMI ĐANG NÓI…", "speaking");
+    ui.systemSpeaker.textContent = "Đang nói";
+  });
+
+  audio.addEventListener("ended", () => {
+    timingMark("audioEnd");
+    resolvePlayback(true);
+  }, { once: true });
+
+  audio.addEventListener("error", () => {
+    fail(new Error("Audio playback error"));
+  }, { once: true });
+
+  setStatus("🔊 MIMI ĐANG CHUẨN BỊ GIỌNG…", "speaking");
+  ui.systemSpeaker.textContent = "Đang chuẩn bị";
+  addActivity("🔊 MIMI đang nói bằng Edge TTS tiếng Việt (streaming)");
+
+  try {
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || !value.byteLength) continue;
+
+      if (!firstChunkMarked) {
+        firstChunkMarked = true;
+        timingMark("audioFirst");
+      }
+
+      // Copy the Uint8Array because the reader's buffer may be reused.
+      queue.push(new Uint8Array(value).buffer);
+      appendNext();
+
+      // Start playback as soon as the first buffered audio is ready.
+      if (!playStarted && audio.readyState >= 2) {
+        try {
+          await audio.play();
+        } catch (error) {
+          fail(error);
+          break;
+        }
+      }
+    }
+
+    streamDone = true;
+    appendNext();
+
+    if (!playStarted && !failed) {
+      try {
+        await audio.play();
+      } catch (error) {
+        fail(error);
+      }
+    }
+
+    return await playbackDone;
+  } catch (error) {
+    fail(error);
+    return false;
+  } finally {
+    try { audio.pause(); } catch {}
+    audio.removeAttribute("src");
+    try { audio.load(); } catch {}
+    URL.revokeObjectURL(audioUrl);
+    ui.systemSpeaker.textContent = "Sẵn sàng";
+    setStatus("Mình đang sẵn sàng", "idle");
+  }
+}
+
 async function speakWithXiaozhi(text) {
-  // Xiaozhi TTS được ưu tiên trước.
-  // Trên laptop: dùng localhost.
-  // Trên điện thoại cùng Wi‑Fi: localhost là chính điện thoại, nên dùng LAN IP.
-  // Nếu GitHub Pages HTTPS chặn HTTP LAN (mixed-content), hàm fail nhanh
-  // để MIMI chuyển sang Worker TTS thay vì chờ lâu.
+  // Xiaozhi/Edge TTS vẫn là adapter TTS của MIMI.
+  // Chỉ nâng cấp đường nhận audio: /api/tts -> /api/tts/stream-http.
+  // Một câu trả lời = một request TTS; audio được phát ngay từ chunk đầu.
   const isLocalHost =
     location.hostname === "localhost" ||
     location.hostname === "127.0.0.1" ||
     location.hostname === "::1";
 
-  const url = String(
+  const baseUrl = String(
     isLocalHost
       ? (CONFIG.xiaozhiTtsUrl || "")
       : (CONFIG.xiaozhiTtsLanUrl || CONFIG.xiaozhiTtsUrl || "")
   ).trim();
+  const url = getTtsStreamUrl(baseUrl);
   if (!url) return false;
 
   const controller = new AbortController();
@@ -540,53 +702,34 @@ async function speakWithXiaozhi(text) {
 
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      console.warn(
-        "Xiaozhi TTS HTTP:",
-        response.status,
-        detail
-      );
+      console.warn("Xiaozhi TTS HTTP:", response.status, detail);
       return false;
     }
 
     const contentType =
-      String(response.headers.get("content-type") || "").toLowerCase();
+      String(response.headers.get("content-type") || "audio/mpeg").toLowerCase();
 
-    // Normal bridge response: audio/mpeg, audio/mp3, audio/wav, etc.
     if (contentType.includes("audio/")) {
-      const blob = await response.blob();
-      return await playTtsAudioBlob(blob);
+      return await playTtsStream(response, contentType);
     }
 
-    // Also accept a JSON response so the bridge can return an audio URL
-    // or base64 audio without requiring another change to MIMI PRO Web.
+    // Compatibility: keep accepting a JSON response from the Worker/legacy bridge.
     if (contentType.includes("application/json")) {
       const data = await response.json();
-
       if (data.audio_url || data.url) {
-        const audioResponse = await fetch(data.audio_url || data.url, {
-          cache: "no-store"
-        });
+        const audioResponse = await fetch(data.audio_url || data.url, { cache: "no-store" });
         if (!audioResponse.ok) return false;
-
         const blob = await audioResponse.blob();
         return await playTtsAudioBlob(blob);
       }
-
       if (data.audio_base64 || data.audio) {
         const base64 = String(data.audio_base64 || data.audio);
         const mime = String(data.mime_type || "audio/mpeg");
         const binary = atob(base64);
         const bytes = new Uint8Array(binary.length);
-
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         return await playTtsAudioBlob(new Blob([bytes], { type: mime }));
       }
-
-      console.warn("Xiaozhi TTS JSON không chứa audio:", data);
-      return false;
     }
 
     console.warn("Xiaozhi TTS không trả về audio:", contentType);
@@ -596,7 +739,8 @@ async function speakWithXiaozhi(text) {
       console.warn("Xiaozhi TTS timeout.");
       addActivity("⚠️ TTS Bridge phản hồi quá lâu");
     } else {
-      console.warn("Xiaozhi TTS chưa sẵn sàng:", error);
+      console.warn("Xiaozhi TTS streaming chưa sẵn sàng:", error);
+      addActivity("⚠️ Edge TTS streaming lỗi; sẽ thử lại");
     }
     return false;
   } finally {
