@@ -1,24 +1,37 @@
 const CONFIG = {
-  // MIMI PRO WEB: LOCAL AI ONLY — không dùng Cloud AI.
-  localCoreUrl: "http://192.168.1.186:3000",
+  // =========================================================
+  // MIMI PRO WEB → MIMI PRO SERVER
+  // =========================================================
+  // Server hợp nhất chạy trên laptop, port 8001.
+  // Giữ tên CONFIG cũ để hạn chế thay đổi phần còn lại của app.js.
+  mimiProServerUrl: "http://192.168.1.186:8001",
+  localCoreUrl: "http://192.168.1.186:8001",
+
+  // Identity của MIMI — dùng key riêng cho User/Session.
+  userIdKey: "mimi_user_id",
+  sessionIdKey: "mimi_session_id",
+
   language: "vi-VN",
 
-  
-  // MIMI PRO WEB → local Xiaozhi/Edge TTS bridge.
-  // The bridge tested successfully on the laptop at port 8788.
-  xiaozhiTtsUrl: "http://127.0.0.1:8788/api/tts",
-  xiaozhiTtsLanUrl: "http://192.168.1.186:8788/api/tts",
+  // =========================================================
+  // MIMI PRO SERVER → TTS ADAPTER
+  // =========================================================
+  // Primary: MIMI PRO Server.
+  // 8788 chỉ giữ làm fallback trong giai đoạn chuyển tiếp.
+  xiaozhiTtsUrl: "http://127.0.0.1:8001/api/tts",
+  xiaozhiTtsLanUrl: "http://192.168.1.186:8001/api/tts",
 
-  // Full-answer TTS: AI trả lời xong mới gửi TOÀN BỘ văn bản 1 lần.
-  // Timeout tự tăng theo độ dài câu trả lời, không cắt câu thành nhiều request.
+  legacyTtsUrl: "http://127.0.0.1:8788/api/tts",
+  legacyTtsLanUrl: "http://192.168.1.186:8788/api/tts",
+
+  // Timeout tự tăng theo độ dài câu trả lời.
   ttsMinTimeout: 15000,
   ttsMaxTimeout: 180000,
 
   // Giữ lại tên cấu hình cũ để tương thích với code/UI cũ.
   ttsEarlyChunkChars: 70,
 
-  // MIMI PRO WEB → MIMI AI Core → TTS Bridge.
-  // Kept as the secondary/fallback TTS path.
+  // Emergency fallback cuối cùng — không dùng trong đường chạy bình thường.
   mimiTtsUrl: "https://mimi-ai-core.tindhdt7.workers.dev/api/tts"
 };
 
@@ -233,42 +246,78 @@ function setCoreState(online) {
 }
 
 async function checkCore() {
+  const base = String(CONFIG.mimiProServerUrl || CONFIG.localCoreUrl || "").replace(/\/$/, "");
+
   try {
-    const response = await fetch(CONFIG.localCoreUrl + "/", {
-      method: "OPTIONS",
+    const response = await fetch(`${base}/api/health`, {
+      method: "GET",
       cache: "no-store"
     });
-    setCoreState(response.ok || response.status === 204);
-  } catch {
-    // CORS/OPTIONS may be unavailable even while POST works.
-    // Keep the UI optimistic until an actual chat request fails.
-    setCoreState(true);
+
+    if (!response.ok) {
+      throw new Error(`MIMI PRO Server HTTP ${response.status}`);
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const aiOk = data?.ai?.ok !== false;
+    const ttsOk = data?.tts?.ok !== false;
+
+    setCoreState(aiOk);
+    addActivity(
+      aiOk
+        ? `🧠 MIMI PRO Server: ONLINE${ttsOk ? " • TTS READY" : " • TTS CHECK"}`
+        : "❌ MIMI PRO Server: AI chưa sẵn sàng"
+    );
+  } catch (error) {
+    // Không đánh dấu ONLINE giả nếu unified server không phản hồi.
+    setCoreState(false);
+    addActivity("❌ Không kết nối MIMI PRO Server: " + error.message);
   }
 }
 
 async function streamMimi(text, onChunk) {
-  const response = await fetch(CONFIG.localCoreUrl + "/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message: text,
-      provider: "local",
-      stream: true,
-      user_id: MIMI_USER_ID,
-      session_id: MIMI_SESSION_ID,
-      source: "mimi-pro-web",
-    }),
-    cache: "no-store"
-  });
+  const primaryBase = String(CONFIG.mimiProServerUrl || "").replace(/\/$/, "");
+  const legacyBase = "http://192.168.1.186:3000";
 
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  async function request(base) {
+    const response = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text,
+        provider: "local",
+        stream: true,
+        user_id: MIMI_USER_ID,
+        session_id: MIMI_SESSION_ID,
+        source: "mimi-pro-web"
+      }),
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+    }
+    return response;
+  }
+
+  let response;
+  try {
+    // Primary: MIMI PRO Server.
+    response = await request(primaryBase);
+  } catch (primaryError) {
+    // Compatibility fallback để Web cũ không bị gãy trong lúc chuyển server.
+    addActivity("⚠️ MIMI PRO Server chưa nhận /api/chat; thử Local AI Core cũ");
+    try {
+      response = await request(legacyBase);
+    } catch {
+      throw primaryError;
+    }
   }
 
   const contentType = String(response.headers.get("content-type") || "").toLowerCase();
 
-  // Backward compatible fallback: old Core can still return one JSON response.
+  // Core cũ hoặc server compatibility có thể trả JSON hoàn chỉnh.
   if (!response.body || contentType.includes("application/json")) {
     const data = await response.json();
     const answer = data.reply || data.response || data.message || data.text ||
@@ -303,7 +352,7 @@ async function streamMimi(text, onChunk) {
         data?.response ?? data?.reply ?? "";
       if (chunk) emit(String(chunk));
     } catch {
-      // Do not treat incomplete SSE JSON as plain text.
+      // Không coi SSE JSON chưa hoàn chỉnh là plain text.
       if (!rawLine.trim().startsWith("data:")) emit(rawLine.trim());
     }
   };
@@ -671,12 +720,19 @@ async function speakWithXiaozhi(text) {
     location.hostname === "127.0.0.1" ||
     location.hostname === "::1";
 
-  const baseUrl = String(
+  const primaryBaseUrl = String(
     isLocalHost
       ? (CONFIG.xiaozhiTtsUrl || "")
       : (CONFIG.xiaozhiTtsLanUrl || CONFIG.xiaozhiTtsUrl || "")
   ).trim();
-  const url = getTtsStreamUrl(baseUrl);
+
+  const legacyBaseUrl = String(
+    isLocalHost
+      ? (CONFIG.legacyTtsUrl || "")
+      : (CONFIG.legacyTtsLanUrl || CONFIG.legacyTtsUrl || "")
+  ).trim();
+
+  const url = getTtsStreamUrl(primaryBaseUrl);
   if (!url) return false;
 
   const controller = new AbortController();
@@ -736,12 +792,53 @@ async function speakWithXiaozhi(text) {
     return false;
   } catch (error) {
     if (error?.name === "AbortError") {
-      console.warn("Xiaozhi TTS timeout.");
-      addActivity("⚠️ TTS Bridge phản hồi quá lâu");
+      console.warn("MIMI PRO TTS timeout.");
+      addActivity("⚠️ MIMI PRO TTS phản hồi quá lâu");
     } else {
-      console.warn("Xiaozhi TTS streaming chưa sẵn sàng:", error);
-      addActivity("⚠️ Edge TTS streaming lỗi; sẽ thử lại");
+      console.warn("MIMI PRO TTS streaming chưa sẵn sàng:", error);
+      addActivity("⚠️ MIMI PRO TTS lỗi; thử TTS 8788 cũ");
     }
+
+    // Fallback tạm thời cho TTS bridge cũ trong giai đoạn chuyển server.
+    if (legacyBaseUrl && legacyBaseUrl !== primaryBaseUrl) {
+      try {
+        const legacyUrl = getTtsStreamUrl(legacyBaseUrl);
+        const retryController = new AbortController();
+        const retryTimeout = setTimeout(
+          () => retryController.abort(),
+          getAdaptiveTtsTimeout(text)
+        );
+
+        try {
+          const retryResponse = await fetch(legacyUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: String(text || ""),
+              language: "vi-VN",
+              voice: "vi-VN-NamMinhNeural"
+            }),
+            cache: "no-store",
+            signal: retryController.signal
+          });
+
+          if (retryResponse.ok) {
+            const retryType = String(
+              retryResponse.headers.get("content-type") || "audio/mpeg"
+            ).toLowerCase();
+
+            if (retryType.includes("audio/")) {
+              return await playTtsStream(retryResponse, retryType);
+            }
+          }
+        } finally {
+          clearTimeout(retryTimeout);
+        }
+      } catch (fallbackError) {
+        console.warn("Legacy TTS fallback failed:", fallbackError);
+      }
+    }
+
     return false;
   } finally {
     clearTimeout(timeout);
@@ -1436,7 +1533,7 @@ if ("speechSynthesis" in window) {
 [
   "MIMI đã sẵn sàng.",
   "Hệ thống khởi động hoàn tất.",
-  "AI Core đang chờ lệnh."
+  "MIMI PRO Server đang chờ lệnh."
 ].forEach(text => addActivity(text));
 
 checkCore();
